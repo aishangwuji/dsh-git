@@ -2044,7 +2044,7 @@ window.__ModuleLoader__.load({
     };
     const TREE_PRIORITY = ['conflict', 'deleted', 'modified', 'added', 'untracked', 'renamed', 'copied', 'ignored'];
     const TREE_REFRESH_MS = 4000;
-    const TREE_POLL_MS = 6000;
+    const TREE_POLL_MS = 12000;
 
     function treeNormalize(value) {
       return String(value == null ? '' : value).replace(/\\/g, '/').replace(/\/+$/, '');
@@ -2122,13 +2122,18 @@ window.__ModuleLoader__.load({
       let lastRefresh = 0;
       let refreshing = false;
       let timer = null;
+      let pendingForce = false;
       let disposed = false;
 
-      const schedule = (delay) => {
-        if (disposed || timer !== null) return;
+      const schedule = (delay, force) => {
+        if (disposed) return;
+        if (force) pendingForce = true;
+        if (timer !== null) return;
         timer = setTimeout(() => {
+          const runForce = pendingForce;
+          pendingForce = false;
           timer = null;
-          void run(false);
+          void run(runForce);
         }, delay == null ? 120 : delay);
       };
 
@@ -2187,7 +2192,7 @@ window.__ModuleLoader__.load({
           await Promise.all(roots.map(async (workspace) => {
             let status;
             try {
-              status = await rpc('status', { workspace: workspace.path });
+              status = await rpc('status-lite', { workspace: workspace.path });
             } catch {
               return;
             }
@@ -2274,6 +2279,9 @@ window.__ModuleLoader__.load({
       }
 
       async function run(force) {
+        // Paint from the last known status first so expanding a folder shows
+        // cached badges immediately; the network refresh follows.
+        decorate();
         await refreshStatuses(force);
         if (!disposed) decorate();
       }
@@ -2300,20 +2308,20 @@ window.__ModuleLoader__.load({
       observer.observe(root, { childList: true, subtree: true });
 
       const onVisible = () => {
-        if (document.visibilityState === 'visible') schedule(200);
+        if (document.visibilityState === 'visible') schedule(200, true);
       };
-      const onExternal = () => schedule(60);
+      const onExternal = () => schedule(60, true);
       document.addEventListener('visibilitychange', onVisible);
       window.addEventListener('focus', onVisible);
       window.addEventListener('dsh-git:refresh', onExternal);
 
       const poll = setInterval(() => {
         if (document.visibilityState === 'visible' && document.querySelector('[data-files-entry]')) {
-          schedule(0);
+          schedule(0, false);
         }
       }, TREE_POLL_MS);
 
-      schedule(400);
+      schedule(400, true);
 
       return () => {
         disposed = true;
