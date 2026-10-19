@@ -1,0 +1,6 @@
+{
+  "meta": {
+    "title": "Git 工作台",
+    "description": "在 Harness 中查看工作区 Git 状态与提交图，完成暂存、提交、拉取和推送。"
+  }
+}

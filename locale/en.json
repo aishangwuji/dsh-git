@@ -1,0 +1,6 @@
+{
+  "meta": {
+    "title": "Git Workbench",
+    "description": "Inspect workspace Git status and history, then stage, commit, pull, and push without leaving Harness."
+  }
+}
