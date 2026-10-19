@@ -322,6 +322,139 @@ export function apply(ctx) {
     return entries;
   }
 
+  /* ------------------------------------------------------------------ *
+   * Short-lived caches
+   *
+   * Every `git` invocation is a process spawn, so the status read is
+   * assembled from the fewest commands possible and cached briefly: the
+   * workbench polls, and the workspace tree asks for the same status while
+   * a folder is being opened.
+   * ------------------------------------------------------------------ */
+
+  const REPO_ROOT_TTL = 60_000;
+  const STATUS_LITE_TTL = 1500;
+  const AUX_TTL = 30_000;
+  const repoRootCache = new Map();
+  const bareCache = new Map();
+  const auxCache = new Map();
+  const statusLiteValues = new Map();
+  const statusLiteInflight = new Map();
+
+  function cacheKey(value) {
+    const absolute = resolve(String(value || '.'));
+    return process.platform === 'win32' ? absolute.toLowerCase() : absolute;
+  }
+
+  function cacheRead(map, key, ttl) {
+    const hit = map.get(key);
+    if (!hit) return undefined;
+    if (Date.now() - hit.at > ttl) {
+      map.delete(key);
+      return undefined;
+    }
+    return hit.value;
+  }
+
+  function cacheWrite(map, key, value) {
+    map.set(key, { at: Date.now(), value });
+  }
+
+  /** Drop the short-lived status caches for one repository after a write. */
+  function invalidateRepo(root) {
+    const key = cacheKey(root);
+    repoRootCache.delete(key);
+    bareCache.delete(key);
+    auxCache.delete(key);
+    statusLiteValues.delete(key);
+  }
+
+  /** Parse the `## branch...upstream [ahead N, behind M]` header of porcelain v1. */
+  function parseBranchHeader(record) {
+    const text = record.slice(2).trim();
+    if (text.startsWith('No commits yet on ')) {
+      return {
+        branch: text.slice('No commits yet on '.length).trim() || null,
+        detached: false,
+        hasCommits: false,
+        upstream: null,
+        ahead: 0,
+        behind: 0,
+      };
+    }
+    if (text.startsWith('HEAD (no branch)')) {
+      return { branch: null, detached: true, hasCommits: true, upstream: null, ahead: 0, behind: 0 };
+    }
+    const bracket = /\[(.*?)\]\s*$/.exec(text);
+    const main = bracket ? text.slice(0, bracket.index).trim() : text;
+    const parts = main.split('...');
+    let ahead = 0;
+    let behind = 0;
+    if (bracket) {
+      for (const piece of bracket[1].split(',')) {
+        const match = /(ahead|behind)\s+(\d+)/.exec(piece.trim());
+        if (!match) continue;
+        if (match[1] === 'ahead') ahead = Number(match[2]) || 0;
+        else behind = Number(match[2]) || 0;
+      }
+    }
+    return {
+      branch: parts[0] || null,
+      detached: !parts[0],
+      hasCommits: true,
+      upstream: parts[1] || null,
+      ahead,
+      behind,
+    };
+  }
+
+  async function resolveRepoRoot(workspacePath, signal) {
+    const key = cacheKey(workspacePath);
+    const cached = cacheRead(repoRootCache, key, REPO_ROOT_TTL);
+    if (cached !== undefined) return cached;
+    const top = await runGit(workspacePath, ['rev-parse', '--show-toplevel'], { signal, timeoutMs: 10_000 });
+    if (top.code !== 0) {
+      cacheWrite(repoRootCache, key, null);
+      return null;
+    }
+    const root = top.stdout.trim();
+    if (!root) throw new GitError('REPO_ROOT_FAILED', '无法确定仓库根目录');
+    cacheWrite(repoRootCache, key, root);
+    return root;
+  }
+
+  async function readStatusLite(workspacePath, signal) {
+    const repoRoot = await resolveRepoRoot(workspacePath, signal);
+    if (!repoRoot) return { isRepo: false, workspaceRoot: workspacePath };
+    const rootKey = cacheKey(repoRoot);
+    const cached = statusLiteValues.get(rootKey);
+    if (cached && Date.now() - cached.at < STATUS_LITE_TTL) return cached.value;
+    const inflight = statusLiteInflight.get(rootKey);
+    if (inflight) return inflight;
+    const promise = (async () => {
+      const status = await runGit(repoRoot, [
+        'status', '--porcelain=v1', '-z', '--untracked-files=all', '--no-renames', '--', '.',
+      ], { signal, timeoutMs: STATUS_TIMEOUT });
+      if (status.code !== 0) {
+        throw new GitError('STATUS_FAILED', status.stderr.trim() || 'git status 执行失败', status.stdout.trim());
+      }
+      const value = {
+        isRepo: true,
+        isBare: false,
+        workspaceRoot: workspacePath,
+        repoRoot,
+        entries: parseStatus(status.stdout),
+      };
+      statusLiteValues.set(rootKey, { at: Date.now(), value });
+      return value;
+    })();
+    statusLiteInflight.set(rootKey, promise);
+    try {
+      return await promise;
+    } finally {
+      statusLiteInflight.delete(rootKey);
+    }
+  }
+
   async function readBranch(root, signal) {
     const symbolic = await runGit(root, ['symbolic-ref', '--quiet', '--short', 'HEAD'], { signal, timeoutMs: 10_000 });
     const branch = symbolic.code === 0 ? symbolic.stdout.trim() : null;
@@ -356,12 +489,18 @@ export function apply(ctx) {
   }
 
   async function readIdentity(root, signal) {
-    const name = await runGit(root, ['config', '--get', 'user.name'], { signal, timeoutMs: 5_000 });
-    const email = await runGit(root, ['config', '--get', 'user.email'], { signal, timeoutMs: 5_000 });
-    return {
-      name: name.code === 0 ? name.stdout.trim() : null,
-      email: email.code === 0 ? email.stdout.trim() : null,
-    };
+    const result = await runGit(root, ['config', '--get-regexp', '^user\\.(name|email)$'], { signal, timeoutMs: 5_000 });
+    let name = null;
+    let email = null;
+    if (result.code === 0) {
+      for (const line of result.stdout.split('\n')) {
+        const match = /^user\.(name|email)\s+(.*)$/.exec(line.trim());
+        if (!match) continue;
+        if (match[1] === 'name') name = match[2];
+        else email = match[2];
+      }
+    }
+    return { name, email };
   }
 
   async function readRemotes(root, signal) {
@@ -371,33 +510,59 @@ export function apply(ctx) {
       : [];
   }
 
+  async function readAux(root, signal) {
+    const key = cacheKey(root);
+    const cached = cacheRead(auxCache, key, AUX_TTL);
+    if (cached !== undefined) return cached;
+    const [remotes, identity] = await Promise.all([
+      readRemotes(root, signal),
+      readIdentity(root, signal),
+    ]);
+    const value = { remotes, identity };
+    cacheWrite(auxCache, key, value);
+    return value;
+  }
+
   async function readStatus(workspacePath, signal) {
-    const inside = await runGit(workspacePath, ['rev-parse', '--is-inside-work-tree'], { signal, timeoutMs: 10_000 });
-    if (inside.code !== 0 || inside.stdout.trim() !== 'true') {
+    const repoRoot = await resolveRepoRoot(workspacePath, signal);
+    if (!repoRoot) {
       return { isRepo: false, workspaceRoot: workspacePath };
     }
 
-    const top = await runGit(workspacePath, ['rev-parse', '--show-toplevel'], { signal, timeoutMs: 10_000 });
-    const repoRoot = top.stdout.trim();
-    if (!repoRoot) throw new GitError('REPO_ROOT_FAILED', '无法确定仓库根目录');
-
-    const bare = await runGit(repoRoot, ['rev-parse', '--is-bare-repository'], { signal, timeoutMs: 10_000 });
-    if (bare.stdout.trim() === 'true') {
+    const rootKey = cacheKey(repoRoot);
+    let isBare = cacheRead(bareCache, rootKey, REPO_ROOT_TTL);
+    if (isBare === undefined) {
+      const bare = await runGit(repoRoot, ['rev-parse', '--is-bare-repository'], { signal, timeoutMs: 10_000 });
+      isBare = bare.code === 0 && bare.stdout.trim() === 'true';
+      cacheWrite(bareCache, rootKey, isBare);
+    }
+    if (isBare) {
       return { isRepo: true, isBare: true, workspaceRoot: workspacePath, repoRoot };
     }
 
+    // `--branch` folds branch, upstream, ahead/behind into the same porcelain
+    // read, so a full status no longer spawns `symbolic-ref` + `rev-list`.
     const status = await runGit(repoRoot, [
-      'status', '--porcelain=v1', '-z', '--untracked-files=all', '--no-renames', '--', '.',
+      'status', '--porcelain=v1', '-z', '--branch', '--untracked-files=all', '--no-renames', '--', '.',
     ], { signal, timeoutMs: STATUS_TIMEOUT });
 
     if (status.code !== 0) {
       throw new GitError('STATUS_FAILED', status.stderr.trim() || 'git status 执行失败', status.stdout.trim());
     }
 
-    const entries = parseStatus(status.stdout);
-    const branchInfo = await readBranch(repoRoot, signal);
-    const remotes = await readRemotes(repoRoot, signal);
-    const identity = await readIdentity(repoRoot, signal);
+    const records = status.stdout.split('\0');
+    const hasHeader = records.length > 0 && records[0].startsWith('## ');
+    const branchInfo = hasHeader
+      ? parseBranchHeader(records[0])
+      : { branch: null, detached: false, hasCommits: true, upstream: null, ahead: 0, behind: 0 };
+    const entries = parseStatus(hasHeader ? records.slice(1).join('\0') : status.stdout);
+
+    statusLiteValues.set(rootKey, {
+      at: Date.now(),
+      value: { isRepo: true, isBare: false, workspaceRoot: workspacePath, repoRoot, entries },
+    });
+
+    const { remotes, identity } = await readAux(repoRoot, signal);
 
     let stagedCount = 0;
     let unstagedCount = 0;
@@ -416,6 +581,7 @@ export function apply(ctx) {
       workspaceRoot: workspacePath,
       repoRoot,
       ...branchInfo,
+      head: null,
       remotes,
       identity,
       entries,
@@ -541,6 +707,7 @@ export function apply(ctx) {
       const result = await runGit(root, ['add', '-A', '--', ...batch], { signal, timeoutMs: WRITE_TIMEOUT });
       if (result.code !== 0) throw new GitError('STAGE_FAILED', result.stderr.trim() || '暂存失败');
     }
+    invalidateRepo(root);
     return { staged: paths.length };
   }
 
@@ -562,6 +729,7 @@ export function apply(ctx) {
       const result = await runGit(root, args, { signal, timeoutMs: WRITE_TIMEOUT });
       if (result.code !== 0) throw new GitError('UNSTAGE_FAILED', result.stderr.trim() || '取消暂存失败');
     }
+    invalidateRepo(root);
     return { unstaged: paths.length };
   }
 
@@ -610,6 +778,7 @@ export function apply(ctx) {
     }
 
     const head = await runGit(root, ['rev-parse', '--short', 'HEAD'], { signal, timeoutMs: 10_000 });
+    invalidateRepo(root);
     return {
       sha: head.code === 0 ? head.stdout.trim() : null,
       output: `${result.stdout}\n${result.stderr}`.trim(),
@@ -690,6 +859,7 @@ export function apply(ctx) {
     if (check.code === 0 && check.stdout.trim() === 'true') {
       return readStatus(root, signal);
     }
+    invalidateRepo(root);
     let result = await runGit(root, ['init', '-b', 'main'], { signal, timeoutMs: WRITE_TIMEOUT });
     if (result.code !== 0) {
       result = await runGit(root, ['init'], { signal, timeoutMs: WRITE_TIMEOUT });
@@ -715,6 +885,8 @@ export function apply(ctx) {
     switch (op) {
       case 'status':
         return readStatus(workspace, signal);
+      case 'status-lite':
+        return readStatusLite(workspace, signal);
       case 'graph':
         return readGraph(workspace, signal);
       case 'commit-detail':
