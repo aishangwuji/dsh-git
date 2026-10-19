@@ -1161,6 +1161,7 @@ window.__ModuleLoader__.load({
           if (seq === statusSeq.current) {
             setStatus(next);
             setLoading(false);
+            window.dispatchEvent(new Event('dsh-git:refresh'));
           }
         } catch (error) {
           if (seq === statusSeq.current) {
@@ -1973,12 +1974,363 @@ window.__ModuleLoader__.load({
       .dshg-ref { font-size: 9px; }
       .dshg-detail { padding: 14px 16px 20px; }
       .dshg-detail-subject { font-size: 15px; }
+      /* Workspace tree Git decorations (right Sidebar files tab) */
+      .dshg-tree-badge {
+        margin-left: auto; flex: 0 0 auto; padding-left: 8px;
+        font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+        font-size: 10px; font-weight: 650; line-height: 1;
+        color: var(--dshg-tree-color, var(--dsw-alias-label-secondary, #6b7280));
+        opacity: .95;
+      }
+      [data-dshg-status="modified"] { --dshg-tree-color: var(--dsw-alias-state-warn-primary, #c28a1a); }
+      [data-dshg-status="added"], [data-dshg-status="untracked"] { --dshg-tree-color: var(--dsw-alias-state-success-primary, #3f9d5a); }
+      [data-dshg-status="deleted"], [data-dshg-status="conflict"] { --dshg-tree-color: var(--dsw-alias-state-error-primary, #d05252); }
+      [data-dshg-status="renamed"], [data-dshg-status="copied"] { --dshg-tree-color: var(--dsw-alias-brand-primary, #4a8cff); }
+      [data-dshg-status] > button > svg,
+      [data-dshg-status] > button > span > svg { color: var(--dshg-tree-color); }
+      .dshg-doc-status {
+        display: inline-flex; align-items: center; gap: 5px; height: 22px; padding: 0 7px;
+        border: 0; border-radius: 4px; background: transparent; font: inherit;
+        color: var(--dsw-alias-label-secondary, #6b7280); font-size: 11px; cursor: pointer;
+      }
+      .dshg-doc-status:hover { background: var(--dsw-alias-interactive-bg-hover, rgba(127,127,127,.08)); color: var(--dsw-alias-label-primary, #111); }
+      .dshg-doc-status-badge {
+        font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+        font-size: 10px; font-weight: 700; line-height: 1; color: var(--dshg-tree-color);
+      }
+      /* Zed-flavoured flattening for the Git panel */
+      .dshg-tab { border-radius: 4px; }
+      .dshg-tab.active { background: transparent; color: var(--dsw-alias-label-primary, #111); box-shadow: inset 0 -1px 0 var(--dsw-alias-brand-primary, #4a8cff); border-radius: 0; }
+      .dshg-badge { background: transparent !important; border: 0 !important; width: 15px; font-weight: 700; }
+      .dshg-overview { align-items: flex-start; padding: 26px 24px; }
+      .dshg-overview-card { width: min(680px, 100%); border: 0; border-radius: 0; background: transparent; box-shadow: none; padding: 0; gap: 0; }
+      .dshg-overview-head { padding-bottom: 12px; }
+      .dshg-overview-grid { border-top: 1px solid var(--dsw-alias-border-l1, #e5e7eb); border-bottom: 1px solid var(--dsw-alias-border-l1, #e5e7eb); }
+      .dshg-metric { border: 0; border-radius: 0; background: transparent; padding: 12px 14px 12px 0; }
+      .dshg-metric + .dshg-metric { border-left: 1px solid var(--dsw-alias-border-l1, #e5e7eb); padding-left: 14px; }
+      .dshg-overview-last { border: 0; border-radius: 0; background: transparent; padding: 12px 0; }
+      .dshg-overview-last:hover { background: var(--dsw-alias-interactive-bg-hover, rgba(127,127,127,.08)); }
+      .dshg-btn { border-color: transparent; background: transparent; }
+      .dshg-btn:hover:not(:disabled) { background: var(--dsw-alias-interactive-bg-hover, rgba(127,127,127,.08)); }
+      .dshg-btn-brand { background: transparent; color: var(--dsw-alias-brand-primary, #4a8cff); border-color: transparent; }
+      .dshg-textarea { border-radius: 4px; background: transparent; }
+      .dshg-commit-bar { background: transparent; }
+      .dshg-line-add { background: color-mix(in srgb, var(--dsw-alias-state-success-primary, #3f9d5a) 10%, transparent); }
+      .dshg-line-del { background: color-mix(in srgb, var(--dsw-alias-state-error-primary, #d05252) 10%, transparent); }
       @media (max-width: 900px) {
         .dshg-left { width: 270px; }
         .dshg-btn-label { display: none; }
         .dshg-commit-hint { display: none; }
       }
     `;
+
+    /* ------------------------------------------------------------------ *
+     * Workspace tree decorations
+     *
+     * The right Sidebar's files tab renders `li[data-files-entry][data-files-path]`
+     * rows but exposes no per-row slot, so we decorate those rows in place: a
+     * MutationObserver keeps badges in sync with the Git status of the open
+     * workspace, without replacing the shipped file tree.
+     * ------------------------------------------------------------------ */
+
+    const TREE_STATUS = {
+      modified: { badge: 'M', labelKey: 'kindModified' },
+      added: { badge: 'A', labelKey: 'kindAdded' },
+      untracked: { badge: 'U', labelKey: 'kindUntracked' },
+      deleted: { badge: 'D', labelKey: 'kindDeleted' },
+      conflict: { badge: '!', labelKey: 'kindConflict' },
+      renamed: { badge: 'R', labelKey: 'kindRenamed' },
+      copied: { badge: 'C', labelKey: 'kindRenamed' },
+    };
+    const TREE_PRIORITY = ['conflict', 'deleted', 'modified', 'added', 'untracked', 'renamed', 'copied', 'ignored'];
+    const TREE_REFRESH_MS = 4000;
+    const TREE_POLL_MS = 6000;
+
+    function treeNormalize(value) {
+      return String(value == null ? '' : value).replace(/\\/g, '/').replace(/\/+$/, '');
+    }
+
+    function treeKey(value) {
+      const normalized = treeNormalize(value);
+      return /^[A-Za-z]:/.test(normalized) ? normalized.toLowerCase() : normalized;
+    }
+
+    function treePriority(kind) {
+      const index = TREE_PRIORITY.indexOf(kind);
+      return index === -1 ? TREE_PRIORITY.length : index;
+    }
+
+    function treeBadgeOf(node) {
+      for (const child of node.children) {
+        if (child.classList && child.classList.contains('dshg-tree-badge')) return child;
+      }
+      return null;
+    }
+
+    /** Latest Git status per absolute file path, shared with the document header chip. */
+    let treeStatusPaths = new Map();
+    /** Latest aggregated Git status per absolute directory path. */
+    let treeStatusDirs = new Map();
+    /** Absolute paths whose status the document header wants even when the tree is closed. */
+    const treeWantedPaths = new Set();
+
+    /** Header chip for the previewed file, fed by the same status cache as the tree badges. */
+    function GitDocumentStatus({ absolutePath, openPanel }) {
+      const [, force] = useState(0);
+      useEffect(() => {
+        if (!absolutePath) return undefined;
+        const key = treeKey(absolutePath);
+        treeWantedPaths.add(key);
+        window.dispatchEvent(new Event('dsh-git:refresh'));
+        const update = () => force((value) => value + 1);
+        window.addEventListener('dsh-git:status', update);
+        return () => {
+          window.removeEventListener('dsh-git:status', update);
+          treeWantedPaths.delete(key);
+          window.dispatchEvent(new Event('dsh-git:refresh'));
+        };
+      }, [absolutePath]);
+      if (!absolutePath) return null;
+      const found = treeStatusPaths.get(treeKey(absolutePath));
+      const status = found ? found.entry : null;
+      if (!status) return null;
+      const meta = TREE_STATUS[status.kind] || TREE_STATUS.modified;
+      const label = t(meta.labelKey);
+      return h('button', {
+        type: 'button',
+        className: 'dshg-doc-status',
+        'data-dshg-status': status.kind,
+        title: label + ' · ' + absolutePath,
+        onClick: openPanel
+          ? () => {
+              try {
+                openPanel();
+              } catch (error) {
+                console.error('[dsh-git] could not open panel', error);
+              }
+            }
+          : undefined,
+      }, h('span', { className: 'dshg-doc-status-badge' }, meta.badge),
+        h('span', { className: 'dshg-doc-status-label' }, label));
+    }
+
+    function installWorkspaceTreeDecorations() {
+      if (typeof document === 'undefined' || typeof MutationObserver === 'undefined') {
+        return () => {};
+      }
+      let workspaces = null;
+      let lastRefresh = 0;
+      let refreshing = false;
+      let timer = null;
+      let disposed = false;
+
+      const schedule = (delay) => {
+        if (disposed || timer !== null) return;
+        timer = setTimeout(() => {
+          timer = null;
+          void run(false);
+        }, delay == null ? 120 : delay);
+      };
+
+      async function ensureWorkspaces() {
+        if (workspaces !== null) return workspaces;
+        try {
+          const list = await rpc('workspaces');
+          workspaces = Array.isArray(list) ? list : [];
+        } catch {
+          workspaces = [];
+        }
+        return workspaces;
+      }
+
+      function activeRoots() {
+        if (!workspaces || workspaces.length === 0) return [];
+        const rows = document.querySelectorAll('[data-files-path]');
+        const wanted = [...treeWantedPaths];
+        const picked = [];
+        for (const workspace of workspaces) {
+          const rootKey = treeKey(workspace && workspace.path);
+          if (!rootKey) continue;
+          let hit = false;
+          for (const row of rows) {
+            const key = treeKey(row.getAttribute('data-files-path'));
+            if (key && (key === rootKey || key.startsWith(rootKey + '/'))) {
+              hit = true;
+              break;
+            }
+          }
+          if (!hit) {
+            for (const key of wanted) {
+              if (key && (key === rootKey || key.startsWith(rootKey + '/'))) {
+                hit = true;
+                break;
+              }
+            }
+          }
+          if (hit) picked.push(workspace);
+        }
+        if (picked.length === 0) picked.push(workspaces[0]);
+        return picked.slice(0, 4);
+      }
+
+      async function refreshStatuses(force) {
+        if (disposed || refreshing) return;
+        const now = Date.now();
+        if (!force && now - lastRefresh < TREE_REFRESH_MS) return;
+        refreshing = true;
+        lastRefresh = now;
+        try {
+          await ensureWorkspaces();
+          const roots = activeRoots();
+          const nextPaths = new Map();
+          const nextDirs = new Map();
+          await Promise.all(roots.map(async (workspace) => {
+            let status;
+            try {
+              status = await rpc('status', { workspace: workspace.path });
+            } catch {
+              return;
+            }
+            if (!status || !status.isRepo || status.isBare || !Array.isArray(status.entries)) return;
+            const repoRoot = treeNormalize(status.repoRoot || workspace.path);
+            for (const entry of status.entries) {
+              if (!entry || !entry.path || entry.kind === 'ignored') continue;
+              const absolute = treeNormalize(repoRoot + '/' + entry.path);
+              nextPaths.set(treeKey(absolute), { entry, absolute });
+              const parts = absolute.split('/');
+              for (let index = parts.length - 1; index >= 1; index -= 1) {
+                const ancestor = parts.slice(0, index).join('/');
+                if (/^[A-Za-z]:$/.test(ancestor)) continue;
+                const key = treeKey(ancestor);
+                if (!key) continue;
+                const priority = treePriority(entry.kind);
+                const current = nextDirs.get(key);
+                if (current) {
+                  current.count += 1;
+                  if (priority < current.priority) {
+                    current.kind = entry.kind;
+                    current.priority = priority;
+                  }
+                } else {
+                  nextDirs.set(key, { kind: entry.kind, count: 1, priority });
+                }
+              }
+            }
+          }));
+          if (!disposed) {
+            treeStatusPaths = nextPaths;
+            treeStatusDirs = nextDirs;
+            window.dispatchEvent(new Event('dsh-git:status'));
+          }
+        } finally {
+          refreshing = false;
+        }
+      }
+
+      function decorateNode(node) {
+        const absolute = node.getAttribute('data-files-path');
+        if (!absolute) return;
+        const type = node.getAttribute('data-files-entry');
+        const key = treeKey(absolute);
+        let status = null;
+        if (type === 'file') {
+          const found = treeStatusPaths.get(key);
+          if (found) status = found.entry;
+        } else if (type === 'directory') {
+          const found = treeStatusDirs.get(key);
+          if (found) status = found;
+        }
+        const host = node.querySelector('button') || node;
+        const badge = treeBadgeOf(host);
+        if (!status) {
+          node.removeAttribute('data-dshg-status');
+          if (badge) badge.remove();
+          if (host.dataset.dshgTitle !== undefined) {
+            host.title = host.dataset.dshgTitle;
+            delete host.dataset.dshgTitle;
+          }
+          return;
+        }
+        const kind = status.kind;
+        const meta = TREE_STATUS[kind] || TREE_STATUS.modified;
+        node.setAttribute('data-dshg-status', kind);
+        if (host.dataset.dshgTitle === undefined) host.dataset.dshgTitle = host.title || '';
+        host.title = t(meta.labelKey) + ' · ' + absolute;
+        const text = type === 'file' ? meta.badge : String(status.count > 99 ? '99+' : status.count);
+        let nextBadge = badge;
+        if (!nextBadge) {
+          nextBadge = document.createElement('span');
+          nextBadge.className = 'dshg-tree-badge';
+          host.appendChild(nextBadge);
+        }
+        if (nextBadge.textContent !== text) nextBadge.textContent = text;
+        nextBadge.setAttribute('data-dshg-kind', kind);
+      }
+
+      function decorate() {
+        for (const node of document.querySelectorAll('[data-files-entry][data-files-path]')) {
+          decorateNode(node);
+        }
+      }
+
+      async function run(force) {
+        await refreshStatuses(force);
+        if (!disposed) decorate();
+      }
+
+      const observer = new MutationObserver((records) => {
+        for (const record of records) {
+          const target = record.target;
+          if (target && target.closest && target.closest('[data-files-entry]')) {
+            schedule(200);
+            return;
+          }
+          for (const node of record.addedNodes) {
+            if (node.nodeType !== 1) continue;
+            if ((node.matches && node.matches('[data-files-path]')) ||
+                (node.querySelector && node.querySelector('[data-files-path]'))) {
+              schedule(200);
+              return;
+            }
+          }
+        }
+      });
+      const root = document.body || document.documentElement;
+      if (!root) return () => {};
+      observer.observe(root, { childList: true, subtree: true });
+
+      const onVisible = () => {
+        if (document.visibilityState === 'visible') schedule(200);
+      };
+      const onExternal = () => schedule(60);
+      document.addEventListener('visibilitychange', onVisible);
+      window.addEventListener('focus', onVisible);
+      window.addEventListener('dsh-git:refresh', onExternal);
+
+      const poll = setInterval(() => {
+        if (document.visibilityState === 'visible' && document.querySelector('[data-files-entry]')) {
+          schedule(0);
+        }
+      }, TREE_POLL_MS);
+
+      schedule(400);
+
+      return () => {
+        disposed = true;
+        observer.disconnect();
+        clearInterval(poll);
+        if (timer !== null) clearTimeout(timer);
+        document.removeEventListener('visibilitychange', onVisible);
+        window.removeEventListener('focus', onVisible);
+        window.removeEventListener('dsh-git:refresh', onExternal);
+        for (const node of document.querySelectorAll('[data-dshg-status]')) {
+          node.removeAttribute('data-dshg-status');
+          const host = node.querySelector('button') || node;
+          const badge = treeBadgeOf(host);
+          if (badge) badge.remove();
+        }
+      };
+    }
 
     function apply(ctx) {
       ctx.effect(() => {
@@ -1992,6 +2344,8 @@ window.__ModuleLoader__.load({
       }, 'dsh-git: styles');
       ctx.effect(() => ctx.locale.register(NS, { zh, en }), 'dsh-git: dictionaries');
       t = ctx.locale.bind(NS);
+
+      ctx.effect(() => installWorkspaceTreeDecorations(), 'dsh-git: workspace tree status');
 
       ctx.effect(() => {
         const onKeyDown = (event) => {
@@ -2034,6 +2388,14 @@ window.__ModuleLoader__.load({
         label: () => t('git'),
         inject: () => ({ openPanel: () => ctx.layout.selectPanel('git') }),
       }, GitSidebarStatus));
+
+      ctx.slots.inject('sidebar.right.tab.document.actions', () => ctx.slots.register({
+        name: 'sidebar.right.tab.document.actions',
+        id: 'git-status',
+        order: 20,
+        locale: NS,
+        inject: () => ({ openPanel: () => ctx.layout.selectPanel('git') }),
+      }, GitDocumentStatus));
     }
 
     return { inject: ['slots', 'locale', 'layout'], apply };
