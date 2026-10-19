@@ -59,6 +59,7 @@ window.__ModuleLoader__.load({
       workingTree: '工作区',
       stagedTab: '已暂存',
       changesTab: '更改',
+      unstagedTab: '未暂存',
       filterPlaceholder: '筛选文件…',
       loading: '加载中…',
       graphEmpty: '还没有提交',
@@ -75,13 +76,16 @@ window.__ModuleLoader__.load({
       back: '返回',
       commitDetail: '提交详情',
       patchTruncated: '内容过长，已截断',
-      shortcuts: '快捷键：Ctrl+Enter 提交 · Alt+S 暂存全部 · Alt+Shift+S 取消暂存 · Alt+G 后 F/P/L 获取/推送/拉取',
+      shortcuts: 'Ctrl+Enter 提交',
       noRemote: '没有远程仓库',
       error: '操作失败',
       filesChanged: '{count} 个文件',
       selectWorkspace: '工作区',
       statusClean: '工作区干净',
       statusCleanDesc: '没有需要提交的更改。',
+      overviewTitle: '仓库概览',
+      branchLabel: '分支',
+      latestCommit: '最近提交',
       kindAdded: '新增',
       kindModified: '修改',
       kindDeleted: '删除',
@@ -173,6 +177,7 @@ window.__ModuleLoader__.load({
       workingTree: 'Working tree',
       stagedTab: 'Staged',
       changesTab: 'Changes',
+      unstagedTab: 'Unstaged',
       filterPlaceholder: 'Filter files…',
       loading: 'Loading…',
       graphEmpty: 'No commits yet',
@@ -189,13 +194,16 @@ window.__ModuleLoader__.load({
       back: 'Back',
       commitDetail: 'Commit detail',
       patchTruncated: 'Output truncated',
-      shortcuts: 'Shortcuts: Ctrl+Enter commit · Alt+S stage all · Alt+Shift+S unstage all · Alt+G then F/P/L fetch/push/pull',
+      shortcuts: 'Ctrl+Enter to commit',
       noRemote: 'No remote configured',
       error: 'Operation failed',
       filesChanged: '{count} files',
       selectWorkspace: 'Workspace',
       statusClean: 'Working tree clean',
       statusCleanDesc: 'Nothing to commit.',
+      overviewTitle: 'Repository overview',
+      branchLabel: 'Branch',
+      latestCommit: 'Latest commit',
       kindAdded: 'Added',
       kindModified: 'Modified',
       kindDeleted: 'Deleted',
@@ -375,6 +383,10 @@ window.__ModuleLoader__.load({
       return h(Svg, props, h('path', { d: 'm5 12 4 4 10-10' }));
     }
 
+    function IconMinus(props) {
+      return h(Svg, props, h('path', { d: 'M5 12h14' }));
+    }
+
     function IconClose(props) {
       return h(Svg, props, h('path', { d: 'M6 6l12 12M18 6 6 18' }));
     }
@@ -394,10 +406,12 @@ window.__ModuleLoader__.load({
 
     function GitPanelIcon({ size = 20, active, openPanel }) {
       const handleClick = openPanel
-        ? (event) => {
-            event.preventDefault();
-            event.stopPropagation();
-            openPanel();
+        ? () => {
+            try {
+              openPanel();
+            } catch (error) {
+              console.error('[dsh-git] could not open panel from sidebar', error);
+            }
           }
         : undefined;
       return h('span', {
@@ -633,15 +647,47 @@ window.__ModuleLoader__.load({
       }
       const lines = text.split('\n');
       const shown = lines.slice(0, 4000);
+      if (shown.length > 0 && shown[shown.length - 1] === '') shown.pop();
+      let oldNumber = 0;
+      let newNumber = 0;
       return h('div', { className: 'dshg-diff-wrap' },
-        h('pre', { className: 'dshg-diff' }, shown.map((line, index) => {
-          let kind = '';
-          if (line.startsWith('@@')) kind = 'hunk';
-          else if (line.startsWith('+++') || line.startsWith('---')) kind = 'meta';
-          else if (line.startsWith('diff --git') || line.startsWith('index ') || line.startsWith('new file') || line.startsWith('deleted file')) kind = 'meta';
-          else if (line.startsWith('+')) kind = 'add';
-          else if (line.startsWith('-')) kind = 'del';
-          return h('div', { key: index, className: cx('dshg-line', kind && `dshg-line-${kind}`) }, line || ' ');
+        h('div', { className: 'dshg-diff' }, shown.map((line, index) => {
+          let kind = 'context';
+          if (line.startsWith('@@')) {
+            kind = 'hunk';
+            const match = /^@@ -(\d+)(?:,\d+)? \+(\d+)(?:,\d+)? @@/.exec(line);
+            if (match) {
+              oldNumber = Number(match[1]) - 1;
+              newNumber = Number(match[2]) - 1;
+            }
+          } else if (
+            line.startsWith('+++') || line.startsWith('---') ||
+            line.startsWith('diff --git') || line.startsWith('index ') ||
+            line.startsWith('new file') || line.startsWith('deleted file') ||
+            line.startsWith('similarity index') || line.startsWith('rename ') ||
+            line.startsWith('\\')
+          ) {
+            kind = 'meta';
+          } else if (line.startsWith('+')) {
+            kind = 'add';
+            newNumber += 1;
+          } else if (line.startsWith('-')) {
+            kind = 'del';
+            oldNumber += 1;
+          } else {
+            oldNumber += 1;
+            newNumber += 1;
+          }
+
+          if (kind === 'hunk' || kind === 'meta') {
+            return h('div', { key: index, className: `dshg-line dshg-line-${kind}` },
+              h('span', { className: 'dshg-code' }, line || ' '));
+          }
+
+          return h('div', { key: index, className: `dshg-line dshg-line-${kind}` },
+            h('span', { className: 'dshg-ln' }, kind === 'add' ? '' : oldNumber),
+            h('span', { className: 'dshg-ln' }, kind === 'del' ? '' : newNumber),
+            h('span', { className: 'dshg-code' }, line || ' '));
         })),
         lines.length > shown.length ? h('div', { className: 'dshg-truncated' }, t('patchTruncated')) : null);
     }
@@ -662,12 +708,14 @@ window.__ModuleLoader__.load({
         : null;
       return h('div', { className: 'dshg-header' },
         h('div', { className: 'dshg-brand' }, h(GitGlyph, { size: 18 }), h('span', null, t('git'))),
-        workspaces.length > 1 ? h('select', {
-          className: 'dshg-select',
-          value: workspace,
-          onChange: (event) => onWorkspace(event.target.value),
-          'aria-label': t('selectWorkspace'),
-        }, workspaces.map((item) => h('option', { key: item.id, value: item.path }, item.title || item.path))) : null,
+        workspaces.length > 1 ? h('span', { className: 'dshg-select-wrap' },
+          h('select', {
+            className: 'dshg-select',
+            value: workspace,
+            onChange: (event) => onWorkspace(event.target.value),
+            'aria-label': t('selectWorkspace'),
+          }, workspaces.map((item) => h('option', { key: item.id, value: item.path }, item.title || item.path))),
+          h('span', { className: 'dshg-select-chevron', 'aria-hidden': true })) : null,
         branchLabel ? h('span', { className: 'dshg-chip', title: status.repoRoot || '' },
           h(IconBranch, { size: 13 }),
           h('strong', null, branchLabel),
@@ -695,7 +743,6 @@ window.__ModuleLoader__.load({
 
     function ChangesList({
       status, loading, expanded, onToggleExpand, onSelect, onOpen, onToggleFile, onToggleDir,
-      onStageAll, onUnstageAll,
     }) {
       if (loading && !status) {
         return h('div', { className: 'dshg-empty dshg-empty-inline' }, t('loading'));
@@ -733,7 +780,7 @@ window.__ModuleLoader__.load({
       if (unstagedEntries.length > 0) {
         sections.push(h('div', { key: 'changes', className: 'dshg-section' },
           h('div', { className: 'dshg-section-head' },
-            h('span', null, t('changesTab')),
+            h('span', null, t('unstagedTab')),
             h('span', { className: 'dshg-count' }, unstagedEntries.length)),
           h('div', { className: 'dshg-tree' }, renderTreeRows({
             node: buildTree(unstagedEntries),
@@ -748,19 +795,52 @@ window.__ModuleLoader__.load({
           }))));
       }
 
-      return h('div', { className: 'dshg-sections' },
-        h('div', { className: 'dshg-left-actions' },
-          h('button', { type: 'button', className: 'dshg-btn dshg-btn-small', onClick: onStageAll }, t('stageAll')),
-          h('button', { type: 'button', className: 'dshg-btn dshg-btn-small', onClick: onUnstageAll }, t('unstageAll'))),
-        sections);
+      return h('div', { className: 'dshg-sections' }, sections);
     }
 
-    function DiffView({ selected, diff, diffLoading, onMode, onClose }) {
+    function RepoOverview({ status, graph, onShowHistory }) {
+      if (!status) {
+        return h(EmptyState, { icon: h(GitGlyph, { size: 28 }), title: t('loading') });
+      }
+      const last = graph && graph[0];
+      const ahead = status.ahead || 0;
+      const behind = status.behind || 0;
+      return h('div', { className: 'dshg-overview' },
+        h('div', { className: 'dshg-overview-card' },
+          h('div', { className: 'dshg-overview-head' },
+            h('div', { className: 'dshg-overview-icon' }, h(GitGlyph, { size: 24 })),
+            h('div', { className: 'dshg-overview-heading' },
+              h('div', { className: 'dshg-overview-title' }, t('overviewTitle')),
+              h('div', { className: 'dshg-overview-sub', title: status.repoRoot || '' }, status.repoRoot || status.workspaceRoot || ''))),
+          h('div', { className: 'dshg-overview-grid' },
+            h('div', { className: 'dshg-metric' },
+              h('span', { className: 'dshg-metric-label' }, t('branchLabel')),
+              h('strong', null, status.branch || t('detached')),
+              h('span', { className: 'dshg-metric-sub' },
+                status.upstream
+                  ? `${status.upstream}${ahead ? ` · ↑${ahead}` : ''}${behind ? ` · ↓${behind}` : ''}`
+                  : t('noRemote'))),
+            h('div', { className: 'dshg-metric' },
+              h('span', { className: 'dshg-metric-label' }, t('changes')),
+              h('strong', null, status.counts.changed),
+              h('span', { className: 'dshg-metric-sub' },
+                `${status.counts.staged} ${t('stagedTab')} · ${status.counts.untracked} ${t('kindUntracked')}`))),
+          last
+            ? h('button', { type: 'button', className: 'dshg-overview-last', onClick: onShowHistory },
+                h('span', { className: 'dshg-overview-last-label' }, t('latestCommit')),
+                h('span', { className: 'dshg-overview-last-subject' }, last.subject),
+                h('span', { className: 'dshg-overview-last-meta' }, `${last.author} · ${formatTime(last.timestamp)}`),
+                h('span', { className: 'dshg-overview-last-action' }, `${t('history')} →`))
+            : h('div', { className: 'dshg-overview-empty' }, t('graphEmpty')),
+          h('div', { className: 'dshg-overview-hints' },
+            h('span', null, h('kbd', null, 'Ctrl+Enter'), ` ${t('commit')}`),
+            h('span', null, h('kbd', null, 'Alt+S'), ` ${t('stageAll')}`),
+            h('span', null, h('kbd', null, 'Ctrl+Shift+G'), ` ${t('panel')}`))));
+    }
+
+    function DiffView({ selected, diff, diffLoading, onMode, onClose, status, graph, onShowHistory }) {
       if (!selected) {
-        return h(EmptyState, {
-          icon: h(GitGlyph, { size: 28 }),
-          title: t('selectFile'),
-        });
+        return h(RepoOverview, { status, graph, onShowHistory });
       }
       return h('div', { className: 'dshg-diff-pane' },
         h('div', { className: 'dshg-diff-head' },
@@ -997,39 +1077,40 @@ window.__ModuleLoader__.load({
       const canCommit = message.trim().length > 0 && !conflicts && !busy && (hasStaged || hasTracked);
       const title = hasStaged ? t('commit') : t('commitTracked');
       return h('div', { className: 'dshg-commit-bar' },
-        conflicts ? h('div', { className: 'dshg-warning' }, t('conflictWarning')) : null,
-        h('textarea', {
-          className: 'dshg-textarea',
-          value: message,
-          placeholder: t('emptyMessage'),
-          onChange: (event) => setMessage(event.target.value),
-          rows: 2,
-          spellCheck: false,
-        }),
-        h('div', { className: 'dshg-commit-actions' },
-          h('button', {
-            type: 'button',
-            className: cx('dshg-option', amend && 'active'),
-            onClick: () => setAmend(!amend),
-            disabled: !status.hasCommits,
-            role: 'checkbox',
-            'aria-checked': amend ? 'true' : 'false',
-          }, amend ? '✓' : '○', t('amend')),
-          h('button', {
-            type: 'button',
-            className: cx('dshg-option', signoff && 'active'),
-            onClick: () => setSignoff(!signoff),
-            role: 'checkbox',
-            'aria-checked': signoff ? 'true' : 'false',
-          }, signoff ? '✓' : '○', t('signoff')),
-          h('span', { className: 'dshg-spacer' }),
-          h('span', { className: 'dshg-commit-hint' }, t('shortcuts')),
-          h('button', {
-            type: 'button',
-            className: 'dshg-btn dshg-btn-brand dshg-commit-button',
-            disabled: !canCommit,
-            onClick: onCommit,
-          }, busy ? t('committing') : title)));
+        h('div', { className: 'dshg-commit-inner' },
+          conflicts ? h('div', { className: 'dshg-warning' }, t('conflictWarning')) : null,
+          h('textarea', {
+            className: 'dshg-textarea',
+            value: message,
+            placeholder: t('emptyMessage'),
+            onChange: (event) => setMessage(event.target.value),
+            rows: 2,
+            spellCheck: false,
+          }),
+          h('div', { className: 'dshg-commit-actions' },
+            h('button', {
+              type: 'button',
+              className: cx('dshg-option', amend && 'active'),
+              onClick: () => setAmend(!amend),
+              disabled: !status.hasCommits,
+              role: 'checkbox',
+              'aria-checked': amend ? 'true' : 'false',
+            }, amend ? '✓' : '○', t('amend')),
+            h('button', {
+              type: 'button',
+              className: cx('dshg-option', signoff && 'active'),
+              onClick: () => setSignoff(!signoff),
+              role: 'checkbox',
+              'aria-checked': signoff ? 'true' : 'false',
+            }, signoff ? '✓' : '○', t('signoff')),
+            h('span', { className: 'dshg-spacer' }),
+            h('span', { className: 'dshg-commit-hint' }, t('shortcuts')),
+            h('button', {
+              type: 'button',
+              className: 'dshg-btn dshg-btn-brand dshg-commit-button',
+              disabled: !canCommit,
+              onClick: onCommit,
+            }, busy ? t('committing') : title))));
     }
 
     function Toast({ toast, onClose }) {
@@ -1183,7 +1264,7 @@ window.__ModuleLoader__.load({
       }, [workspace]);
 
       useEffect(() => {
-        if (!workspace || tab !== 'history') return;
+        if (!workspace) return;
         let alive = true;
         setGraphLoading(true);
         loadGraph(workspace).then(() => {
@@ -1194,7 +1275,7 @@ window.__ModuleLoader__.load({
           setToast({ kind: 'error', text: errorText(error), detail: error.detail || null });
         });
         return () => { alive = false; };
-      }, [workspace, tab, graphVersion, loadGraph]);
+      }, [workspace, graphVersion, loadGraph]);
 
       useEffect(() => {
         if (!toast) return;
@@ -1471,7 +1552,23 @@ window.__ModuleLoader__.load({
           h('div', { className: 'dshg-pane-head' },
             h('span', { className: 'dshg-pane-title' }, t('changes')),
             h('span', { className: 'dshg-count' }, status.counts.changed),
-            h('span', { className: 'dshg-spacer' })),
+            h('span', { className: 'dshg-spacer' }),
+            h('button', {
+              type: 'button',
+              className: 'dshg-iconbtn',
+              title: t('stageAll'),
+              'aria-label': t('stageAll'),
+              disabled: Boolean(busy) || status.counts.changed === 0,
+              onClick: stageAll,
+            }, h(IconCheck, { size: 14 })),
+            h('button', {
+              type: 'button',
+              className: 'dshg-iconbtn',
+              title: t('unstageAll'),
+              'aria-label': t('unstageAll'),
+              disabled: Boolean(busy) || status.counts.staged === 0,
+              onClick: unstageAll,
+            }, h(IconMinus, { size: 14 }))),
           h('div', { className: 'dshg-scroll' },
             h(ChangesList, {
               status,
@@ -1482,8 +1579,6 @@ window.__ModuleLoader__.load({
               onOpen: openFile,
               onToggleFile: toggleFile,
               onToggleDir: toggleDir,
-              onStageAll: stageAll,
-              onUnstageAll: unstageAll,
             }))),
         h('div', { className: 'dshg-right' },
           h('div', { className: 'dshg-tabs' },
@@ -1505,6 +1600,9 @@ window.__ModuleLoader__.load({
               diffLoading,
               onMode: switchDiffMode,
               onClose: () => { setSelected(null); setDiff(null); },
+              status,
+              graph,
+              onShowHistory: () => setTab('history'),
             }) : h(HistoryView, {
               graph,
               graphLoading,
@@ -1799,6 +1897,82 @@ window.__ModuleLoader__.load({
       .dshg-sidebar-status:hover { background: var(--dsw-alias-bg-layer-1, #f3f4f6); color: var(--dsw-alias-label-primary, #111); }
       .dshg-mini-dot { width: 6px; height: 6px; border-radius: 50%; display: inline-block; }
       .dshg-side-count { font-size: 10px; font-weight: 700; color: var(--dsw-alias-label-primary, #111); }
+      /* Visual polish: denser, host-like surfaces */
+      .dshg-root { font-size: 12px; letter-spacing: 0; }
+      .dshg-header { height: 42px; min-height: 42px; padding: 0 12px; gap: 8px; }
+      .dshg-brand { font-size: 13px; font-weight: 650; gap: 7px; }
+      .dshg-select-wrap { position: relative; display: inline-flex; align-items: center; min-width: 0; }
+      .dshg-select { appearance: none; padding: 0 24px 0 8px; max-width: 200px; height: 26px; background: var(--dsw-alias-bg-layer-1, #f8fafc); }
+      .dshg-select-chevron { position: absolute; right: 8px; pointer-events: none; width: 0; height: 0; border-left: 4px solid transparent; border-right: 4px solid transparent; border-top: 5px solid var(--dsw-alias-label-secondary, #6b7280); }
+      .dshg-chip { height: 22px; padding: 0 7px; font-size: 10.5px; }
+      .dshg-actions { gap: 2px; }
+      .dshg-btn { height: 26px; padding: 0 8px; font-size: 11.5px; border-radius: 6px; }
+      .dshg-iconbtn { width: 26px; height: 26px; }
+      .dshg-left { width: 300px; background: var(--dsw-alias-bg-layer-1, #f8fafc); }
+      .dshg-pane-head { height: 34px; padding: 0 8px 0 12px; gap: 6px; }
+      .dshg-pane-title { font-size: 12px; }
+      .dshg-count { height: 17px; min-width: 17px; padding: 0 5px; line-height: 17px; font-size: 9.5px; }
+      .dshg-pane-head .dshg-iconbtn { width: 24px; height: 24px; color: var(--dsw-alias-label-secondary, #6b7280); }
+      .dshg-pane-head .dshg-iconbtn:hover:not(:disabled) { color: var(--dsw-alias-label-primary, #111); }
+      .dshg-scroll { padding-bottom: 6px; }
+      .dshg-section-head { height: 26px; padding: 0 12px; font-size: 9.5px; }
+      .dshg-row { min-height: 25px; gap: 5px; padding-right: 10px; }
+      .dshg-dir-row { min-height: 24px; }
+      .dshg-file-row { min-height: 25px; }
+      .dshg-file-name { font-size: 12px; }
+      .dshg-dir-name { font-size: 11.5px; }
+      .dshg-dir-count { font-size: 9.5px; }
+      .dshg-badge { width: 15px; height: 15px; line-height: 15px; font-size: 9px; border-radius: 4px; }
+      .dshg-check { width: 14px; height: 14px; }
+      .dshg-tabs { height: 34px; padding: 0 8px; gap: 2px; }
+      .dshg-tab { height: 26px; padding: 0 9px; font-size: 11.5px; border-radius: 5px; }
+      .dshg-tab.active { background: var(--dsw-alias-bg-layer-2, #eef2f7); font-weight: 600; }
+      .dshg-diff-head { min-height: 38px; padding: 0 12px; }
+      .dshg-diff-path { font-size: 12px; }
+      .dshg-diff-body { background: var(--dsw-alias-bg-base, #fff); }
+      .dshg-diff { font-size: 11.5px; line-height: 1.55; }
+      .dshg-diff-wrap { padding: 2px 0 18px; }
+      .dshg-line { display: grid; grid-template-columns: 42px 42px minmax(0, 1fr); min-height: 18px; padding: 0; white-space: pre; }
+      .dshg-ln { text-align: right; padding-right: 7px; color: var(--dsw-alias-label-secondary, #6b7280); opacity: .55; user-select: none; font-variant-numeric: tabular-nums; border-right: 1px solid var(--dsw-alias-border-l1, #e5e7eb); margin-right: 8px; }
+      .dshg-code { padding-right: 12px; overflow: visible; }
+      .dshg-line-hunk, .dshg-line-meta { display: block; padding: 2px 12px; }
+      .dshg-line-hunk { background: var(--dsw-alias-bg-layer-1, #f8fafc); color: var(--dsw-alias-brand-primary, #2563eb); border-top: 1px solid var(--dsw-alias-border-l1, #e5e7eb); border-bottom: 1px solid var(--dsw-alias-border-l1, #e5e7eb); }
+      .dshg-line-add { background: color-mix(in srgb, var(--dsw-alias-state-success-primary, #16a34a) 9%, transparent); }
+      .dshg-line-del { background: color-mix(in srgb, var(--dsw-alias-state-error-primary, #dc2626) 9%, transparent); }
+      .dshg-commit-bar { padding: 8px 12px 10px; background: var(--dsw-alias-bg-base, #fff); }
+      .dshg-commit-inner { width: 100%; max-width: 1180px; margin: 0 auto; display: flex; flex-direction: column; gap: 6px; }
+      .dshg-textarea { min-height: 46px; max-height: 90px; font-size: 12px; padding: 7px 9px; }
+      .dshg-commit-actions { gap: 6px; }
+      .dshg-commit-hint { font-size: 10px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; max-width: 46%; }
+      .dshg-commit-button { height: 28px; min-width: 126px; background: var(--dsw-alias-brand-primary, #2563eb); border-color: var(--dsw-alias-brand-primary, #2563eb); color: #fff; font-weight: 600; }
+      .dshg-commit-button:hover:not(:disabled) { background: var(--dsw-alias-brand-primary, #2563eb); filter: brightness(1.06); }
+      .dshg-overview { flex: 1 1 auto; display: flex; align-items: center; justify-content: center; padding: 28px; overflow: auto; }
+      .dshg-overview-card { width: min(620px, 100%); border: 1px solid var(--dsw-alias-border-l1, #e5e7eb); border-radius: 10px; background: var(--dsw-alias-bg-layer-1, #f8fafc); padding: 18px; display: flex; flex-direction: column; gap: 14px; box-shadow: 0 1px 2px rgba(0,0,0,.04); }
+      .dshg-overview-head { display: flex; align-items: flex-start; gap: 10px; }
+      .dshg-overview-icon { width: 40px; height: 40px; border-radius: 10px; display: flex; align-items: center; justify-content: center; background: var(--dsw-alias-bg-layer-2, #eef2f7); color: var(--dsw-alias-brand-primary, #2563eb); flex: 0 0 auto; }
+      .dshg-overview-heading { min-width: 0; }
+      .dshg-overview-title { font-size: 14px; font-weight: 650; }
+      .dshg-overview-sub { margin-top: 3px; color: var(--dsw-alias-label-secondary, #6b7280); font-size: 10.5px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+      .dshg-overview-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 8px; }
+      .dshg-metric { border: 1px solid var(--dsw-alias-border-l1, #e5e7eb); border-radius: 7px; padding: 9px 10px; display: flex; flex-direction: column; gap: 2px; background: var(--dsw-alias-bg-base, #fff); min-width: 0; }
+      .dshg-metric-label { color: var(--dsw-alias-label-secondary, #6b7280); font-size: 9.5px; text-transform: uppercase; letter-spacing: .04em; }
+      .dshg-metric strong { font-size: 15px; font-weight: 650; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+      .dshg-metric-sub { color: var(--dsw-alias-label-secondary, #6b7280); font-size: 10px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+      .dshg-overview-last { display: grid; grid-template-columns: 1fr auto; gap: 2px 10px; text-align: left; border: 1px solid var(--dsw-alias-border-l1, #e5e7eb); border-radius: 7px; background: var(--dsw-alias-bg-base, #fff); padding: 9px 10px; cursor: pointer; color: inherit; font: inherit; }
+      .dshg-overview-last:hover { border-color: var(--dsw-alias-border-l2, #d1d5db); }
+      .dshg-overview-last-label { color: var(--dsw-alias-label-secondary, #6b7280); font-size: 9.5px; text-transform: uppercase; letter-spacing: .04em; }
+      .dshg-overview-last-subject { grid-column: 1; font-size: 12px; font-weight: 550; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+      .dshg-overview-last-meta { grid-column: 1; color: var(--dsw-alias-label-secondary, #6b7280); font-size: 10px; }
+      .dshg-overview-last-action { grid-column: 2; grid-row: 1 / span 3; align-self: center; color: var(--dsw-alias-brand-primary, #2563eb); font-size: 10.5px; }
+      .dshg-overview-empty { border: 1px dashed var(--dsw-alias-border-l1, #e5e7eb); border-radius: 7px; padding: 10px; text-align: center; color: var(--dsw-alias-label-secondary, #6b7280); font-size: 11px; }
+      .dshg-overview-hints { display: flex; flex-wrap: wrap; gap: 10px; color: var(--dsw-alias-label-secondary, #6b7280); font-size: 10px; }
+      .dshg-overview-hints kbd { font-family: inherit; font-size: 9px; padding: 1px 4px; border: 1px solid var(--dsw-alias-border-l1, #e5e7eb); border-radius: 4px; background: var(--dsw-alias-bg-base, #fff); color: var(--dsw-alias-label-secondary, #6b7280); }
+      .dshg-commit-row { min-height: 30px; padding: 0 12px; }
+      .dshg-commit-subject { font-size: 12px; }
+      .dshg-commit-meta { font-size: 9.5px; }
+      .dshg-ref { font-size: 9px; }
+      .dshg-detail { padding: 14px 16px 20px; }
+      .dshg-detail-subject { font-size: 15px; }
       @media (max-width: 900px) {
         .dshg-left { width: 270px; }
         .dshg-btn-label { display: none; }
