@@ -1,6 +1,6 @@
 {
   "meta": {
     "title": "Git Workbench",
-    "description": "Inspect workspace Git status and history, then stage, commit, pull, and push without leaving Harness."
+    "description": "Discovers every Git repository in the workspace, including independent projects in subfolders, then shows status and history and stages, commits, pulls, and pushes."
   }
 }

@@ -1,5 +1,6 @@
 import { existsSync } from 'node:fs';
-import { resolve, sep } from 'node:path';
+import { readdir, stat } from 'node:fs/promises';
+import { basename, join, relative, resolve, sep } from 'node:path';
 
 /**
  * Host half of the Git workbench.
@@ -16,6 +17,31 @@ const MAX_OUTPUT = 4 * 1024 * 1024;
 const STATUS_TIMEOUT = 30_000;
 const WRITE_TIMEOUT = 30_000;
 const REMOTE_TIMEOUT = 120_000;
+
+/**
+ * Repository discovery follows Zed's worktree scan: a directory that contains a
+ * `.git` entry *is* a repository, `.git` internals are never walked, and a
+ * repository nested inside another one is an independent project rather than an
+ * exclusion. The walk is bounded by depth and by a directory budget so a
+ * workspace that also holds `node_modules`, virtualenvs, or build output stays
+ * cheap. Dependency and cache folders are not walked, but each one is still
+ * probed for a `.git` entry, so a repository is never lost because of its name.
+ */
+const DISCOVERY_TTL = 30_000;
+const DISCOVERY_MAX_DEPTH = 8;
+const DISCOVERY_MAX_DIRS = 6_000;
+const DISCOVERY_CONCURRENCY = 8;
+const REPO_READ_CONCURRENCY = 6;
+const DISCOVERY_SKIP_DIRS = new Set([
+  'node_modules', 'bower_components', 'jspm_packages',
+  '.venv', 'venv', 'env', 'virtualenv', 'site-packages',
+  '__pycache__', '.mypy_cache', '.pytest_cache', '.ruff_cache', '.tox',
+  'target', 'dist', 'build', 'out', '.output', '.next', '.nuxt', '.svelte-kit',
+  '.cache', '.parcel-cache', '.turbo', '.gradle', '.dart_tool', '.pub-cache',
+  'coverage', 'htmlcov', '.terraform', '.serverless',
+  'pods', 'deriveddata', 'vendor', '.bundle',
+  '.idea', '.vs', '.vscode-test',
+]);
 
 const GIT_GLOBAL_ARGS = [
   '--literal-pathspecs',
@@ -331,14 +357,16 @@ export function apply(ctx) {
    * a folder is being opened.
    * ------------------------------------------------------------------ */
 
-  const REPO_ROOT_TTL = 60_000;
   const STATUS_LITE_TTL = 1500;
+  const SUMMARY_TTL = 8_000;
+  const SNAPSHOT_FAILURE_TTL = 30_000;
   const AUX_TTL = 30_000;
-  const repoRootCache = new Map();
-  const bareCache = new Map();
+  const discoveryCache = new Map();
+  const discoveryInflight = new Map();
   const auxCache = new Map();
   const statusLiteValues = new Map();
   const statusLiteInflight = new Map();
+  const snapshotFailures = new Map();
 
   function cacheKey(value) {
     const absolute = resolve(String(value || '.'));
@@ -362,10 +390,246 @@ export function apply(ctx) {
   /** Drop the short-lived status caches for one repository after a write. */
   function invalidateRepo(root) {
     const key = cacheKey(root);
-    repoRootCache.delete(key);
-    bareCache.delete(key);
     auxCache.delete(key);
     statusLiteValues.delete(key);
+    snapshotFailures.delete(key);
+  }
+
+  /** Drop the discovered repository list for one workspace (after `git init`). */
+  function invalidateWorkspace(workspacePath) {
+    discoveryCache.delete(cacheKey(workspacePath));
+  }
+
+  function emptyCounts() {
+    return { changed: 0, staged: 0, unstaged: 0, conflicts: 0, untracked: 0 };
+  }
+
+  function countEntries(entries) {
+    const counts = emptyCounts();
+    counts.changed = entries.length;
+    for (const entry of entries) {
+      if (entry.conflict) counts.conflicts += 1;
+      if (entry.kind === 'untracked') counts.untracked += 1;
+      if (entry.staged || entry.partial) counts.staged += 1;
+      if (!entry.staged || entry.partial) counts.unstaged += 1;
+    }
+    return counts;
+  }
+
+  function addCounts(total, part) {
+    if (!part) return total;
+    total.changed += part.changed || 0;
+    total.staged += part.staged || 0;
+    total.unstaged += part.unstaged || 0;
+    total.conflicts += part.conflicts || 0;
+    total.untracked += part.untracked || 0;
+    return total;
+  }
+
+  /** True when `child` is `parent` or lives below it (case-correct on Windows). */
+  function pathIsInside(parent, child) {
+    const base = cacheKey(parent);
+    const target = cacheKey(child);
+    const prefix = base.endsWith(sep) ? base : base + sep;
+    return target === base || target.startsWith(prefix);
+  }
+
+  /** The kind of `.git` entry in a directory, or null when there is none. */
+  async function dotGitKind(dir) {
+    try {
+      const info = await stat(join(dir, '.git'));
+      return info.isDirectory() ? 'worktree' : 'gitfile';
+    } catch {
+      return null;
+    }
+  }
+
+  /**
+   * Walk a workspace for repositories, in the spirit of Zed's worktree scan.
+   *
+   * The `.git` entry of a directory is read from the same `readdir` that lists
+   * its children, so the scan needs no extra stat per directory. A worktree
+   * (`.git` directory) and a gitfile (linked worktree or submodule, `.git`
+   * file) both count; a bare checkout (`HEAD` + `objects` + a ref store and no
+   * `.git`) counts too, and is never walked because it has no work tree.
+   */
+  async function scanRepositories(workspacePath, signal) {
+    const root = resolve(workspacePath);
+    const queue = [{ dir: root, depth: 0 }];
+    const found = new Map();
+    let cursor = 0;
+    let visited = 0;
+    let truncated = false;
+
+    const worker = async () => {
+      while (cursor < queue.length) {
+        if (signal?.aborted) return;
+        if (visited >= DISCOVERY_MAX_DIRS) {
+          truncated = true;
+          return;
+        }
+        const task = queue[cursor];
+        cursor += 1;
+        visited += 1;
+
+        let entries;
+        try {
+          entries = await readdir(task.dir, { withFileTypes: true });
+        } catch {
+          // Unreadable or vanished directories are skipped, never fatal.
+          continue;
+        }
+
+        let kind = null;
+        let hasHead = false;
+        let hasObjects = false;
+        let hasRefs = false;
+        const children = [];
+        const skipped = [];
+        for (const entry of entries) {
+          const name = entry.name;
+          if (name === '.git') {
+            kind = entry.isDirectory() ? 'worktree' : 'gitfile';
+            continue;
+          }
+          if (name === 'HEAD' && entry.isFile()) {
+            hasHead = true;
+            continue;
+          }
+          if (name === 'objects' && entry.isDirectory()) {
+            hasObjects = true;
+            continue;
+          }
+          if (name === 'refs' || name === 'reftable') {
+            hasRefs = true;
+            continue;
+          }
+          if (!entry.isDirectory()) continue;
+          if (task.depth >= DISCOVERY_MAX_DEPTH) continue;
+          const child = join(task.dir, name);
+          if (DISCOVERY_SKIP_DIRS.has(name.toLowerCase())) skipped.push(child);
+          else children.push(child);
+        }
+
+        if (!kind && hasHead && hasObjects && hasRefs) kind = 'bare';
+        if (kind) {
+          found.set(cacheKey(task.dir), { root: task.dir, kind, isBare: kind === 'bare' });
+        }
+        if (kind === 'bare') continue;
+
+        // Pruned dependency/cache folders are still probed once for a `.git`
+        // entry: a project that happens to be named like one of them survives,
+        // even though its own subdirectories are not walked.
+        for (const child of skipped) {
+          const childKind = await dotGitKind(child);
+          if (childKind) {
+            found.set(cacheKey(child), { root: child, kind: childKind, isBare: false });
+          }
+        }
+        for (const child of children) queue.push({ dir: child, depth: task.depth + 1 });
+      }
+    };
+
+    await Promise.all(Array.from({ length: DISCOVERY_CONCURRENCY }, () => worker()));
+    if (truncated) {
+      logger?.warn?.(`[dsh-git] repository scan of ${root} stopped after ${DISCOVERY_MAX_DIRS} directories`);
+    }
+
+    if (found.size === 0 && !signal?.aborted) {
+      // A workspace can also be a subdirectory of a repository whose `.git`
+      // lives above it (Zed keeps this case alive as an external work
+      // directory). Only fall back when the workspace holds no repo itself, so
+      // nested independent projects always win.
+      try {
+        const top = await runGit(root, ['rev-parse', '--show-toplevel'], { signal, timeoutMs: 10_000 });
+        const topLevel = top.code === 0 ? top.stdout.trim() : '';
+        if (topLevel && pathIsInside(topLevel, root)) {
+          found.set(cacheKey(topLevel), {
+            root: resolve(topLevel),
+            kind: 'enclosing',
+            isBare: false,
+            relativePath: '',
+          });
+        }
+      } catch {
+        // No enclosing repository: the workspace simply has no Git repository.
+      }
+    }
+
+    return Array.from(found.values())
+      .map((entry) => ({
+        ...entry,
+        relativePath: entry.relativePath !== undefined
+          ? entry.relativePath
+          : relative(root, entry.root).replace(/\\/g, '/'),
+      }))
+      .sort((a, b) => a.relativePath.localeCompare(b.relativePath));
+  }
+
+  async function listRepositories(workspacePath, signal) {
+    const key = cacheKey(workspacePath);
+    const cached = cacheRead(discoveryCache, key, DISCOVERY_TTL);
+    if (cached !== undefined) return cached;
+    const inflight = discoveryInflight.get(key);
+    if (inflight) return inflight;
+    const promise = scanRepositories(workspacePath, signal)
+      .then((value) => {
+        // Do not cache an aborted scan: it may be missing directories.
+        if (!signal?.aborted) cacheWrite(discoveryCache, key, value);
+        return value;
+      })
+      .finally(() => {
+        discoveryInflight.delete(key);
+      });
+    discoveryInflight.set(key, promise);
+    return promise;
+  }
+
+  /** The repository that owns the workspace root, else the shallowest one. */
+  function primaryRepository(repos) {
+    return repos.find((repo) => repo.relativePath === '') || repos[0] || null;
+  }
+
+  /** Resolve a repository from the client: absolute root or workspace-relative. */
+  function findRepository(workspaceRoot, repos, value) {
+    if (typeof value !== 'string' || value.length === 0 || value.length > 4096) return null;
+    const normalized = value.replace(/\\/g, '/');
+    const absolute = cacheKey(resolve(workspaceRoot, normalized));
+    const relativeValue = normalized.replace(/^\.\//, '').replace(/\/+$/, '');
+    return repos.find((repo) => cacheKey(repo.root) === absolute
+      || (repo.relativePath !== '' && repo.relativePath === relativeValue)) || null;
+  }
+
+  /** Validate the repository a write operation targets, refusing ambiguity. */
+  function requireRepositoryForOperation(workspaceRoot, repos, value) {
+    if (repos.length === 0) throw new GitError('NOT_A_REPO', '当前工作区没有 Git 仓库');
+    if (value == null || value === '') {
+      if (repos.length > 1) {
+        throw new GitError('REPO_REQUIRED', '工作区中有多个 Git 仓库，请先选择一个仓库');
+      }
+      return repos[0].root;
+    }
+    const found = findRepository(workspaceRoot, repos, value);
+    if (!found) throw new GitError('REPO_NOT_FOUND', '该仓库不在当前工作区内');
+    return found.root;
+  }
+
+  function summarizeRepository(repo, snapshot, error) {
+    return {
+      root: repo.root,
+      name: basename(repo.root),
+      relativePath: repo.relativePath,
+      kind: repo.kind,
+      isBare: Boolean(snapshot && snapshot.isBare),
+      hasCommits: Boolean(snapshot && snapshot.hasCommits),
+      branch: snapshot ? snapshot.branch : null,
+      detached: Boolean(snapshot && snapshot.detached),
+      upstream: snapshot ? snapshot.upstream : null,
+      ahead: (snapshot && snapshot.ahead) || 0,
+      behind: (snapshot && snapshot.behind) || 0,
+      counts: snapshot ? snapshot.counts : emptyCounts(),
+      error: error || null,
+    };
   }
 
   /** Parse the `## branch...upstream [ahead N, behind M]` header of porcelain v1. */
@@ -407,52 +671,164 @@ export function apply(ctx) {
     };
   }
 
-  async function resolveRepoRoot(workspacePath, signal) {
-    const key = cacheKey(workspacePath);
-    const cached = cacheRead(repoRootCache, key, REPO_ROOT_TTL);
-    if (cached !== undefined) return cached;
-    const top = await runGit(workspacePath, ['rev-parse', '--show-toplevel'], { signal, timeoutMs: 10_000 });
-    if (top.code !== 0) {
-      cacheWrite(repoRootCache, key, null);
-      return null;
-    }
-    const root = top.stdout.trim();
-    if (!root) throw new GitError('REPO_ROOT_FAILED', '无法确定仓库根目录');
-    cacheWrite(repoRootCache, key, root);
-    return root;
-  }
-
-  async function readStatusLite(workspacePath, signal) {
-    const repoRoot = await resolveRepoRoot(workspacePath, signal);
-    if (!repoRoot) return { isRepo: false, workspaceRoot: workspacePath };
+  /**
+   * One `git status` read per repository, shared by the workbench poll, the
+   * file tree, and the repository switcher. `--branch` folds branch, upstream
+   * and ahead/behind into the same porcelain output, so a repository costs a
+   * single spawn here instead of the old `symbolic-ref` + `rev-list` trio.
+   *
+   * `maxAge` lets the workbench keep the selected repository fresh while the
+   * other repositories only feed the switcher's change counts.
+   */
+  async function readRepoSnapshot(repoRoot, signal, maxAge = STATUS_LITE_TTL) {
     const rootKey = cacheKey(repoRoot);
     const cached = statusLiteValues.get(rootKey);
-    if (cached && Date.now() - cached.at < STATUS_LITE_TTL) return cached.value;
+    if (cached && Date.now() - cached.at < maxAge) return cached.value;
+    // A work tree that cannot be read (an uninitialised submodule, a locked
+    // index) stays broken for a while; retrying it on every poll would spawn
+    // Git for nothing, so remember the failure briefly.
+    const failed = cacheRead(snapshotFailures, rootKey, SNAPSHOT_FAILURE_TTL);
+    if (failed !== undefined) throw new GitError(failed.code, failed.message, failed.detail);
     const inflight = statusLiteInflight.get(rootKey);
     if (inflight) return inflight;
     const promise = (async () => {
       const status = await runGit(repoRoot, [
-        'status', '--porcelain=v1', '-z', '--untracked-files=all', '--no-renames', '--', '.',
+        'status', '--porcelain=v1', '-z', '--branch', '--untracked-files=all', '--no-renames', '--', '.',
       ], { signal, timeoutMs: STATUS_TIMEOUT });
       if (status.code !== 0) {
+        // A bare repository has no work tree, so `git status` refuses to run.
+        // It is still a repository we report, just without file statuses.
+        const bare = await runGit(repoRoot, ['rev-parse', '--is-bare-repository'], { signal, timeoutMs: 10_000 });
+        if (bare.code === 0 && bare.stdout.trim() === 'true') {
+          const bareValue = {
+            repoRoot,
+            isBare: true,
+            hasCommits: false,
+            branch: null,
+            detached: false,
+            upstream: null,
+            ahead: 0,
+            behind: 0,
+            entries: [],
+            counts: emptyCounts(),
+          };
+          statusLiteValues.set(rootKey, { at: Date.now(), value: bareValue });
+          return bareValue;
+        }
         throw new GitError('STATUS_FAILED', status.stderr.trim() || 'git status 执行失败', status.stdout.trim());
       }
+
+      const records = status.stdout.split('\0');
+      const hasHeader = records.length > 0 && records[0].startsWith('## ');
+      const branchInfo = hasHeader
+        ? parseBranchHeader(records[0])
+        : { branch: null, detached: false, hasCommits: true, upstream: null, ahead: 0, behind: 0 };
+      const entries = parseStatus(hasHeader ? records.slice(1).join('\0') : status.stdout);
       const value = {
-        isRepo: true,
-        isBare: false,
-        workspaceRoot: workspacePath,
         repoRoot,
-        entries: parseStatus(status.stdout),
+        isBare: false,
+        ...branchInfo,
+        entries,
+        counts: countEntries(entries),
       };
       statusLiteValues.set(rootKey, { at: Date.now(), value });
       return value;
-    })();
+    })().catch((error) => {
+      if (error instanceof GitError && error.code === 'STATUS_FAILED') {
+        cacheWrite(snapshotFailures, rootKey, {
+          code: error.code,
+          message: error.message,
+          detail: error.detail,
+        });
+      }
+      throw error;
+    });
     statusLiteInflight.set(rootKey, promise);
     try {
       return await promise;
     } finally {
       statusLiteInflight.delete(rootKey);
     }
+  }
+
+  /** Run `fn` over `items` with bounded concurrency; each outcome is boxed. */
+  async function mapLimit(items, limit, fn) {
+    const results = new Array(items.length);
+    let cursor = 0;
+    const worker = async () => {
+      for (;;) {
+        const index = cursor;
+        cursor += 1;
+        if (index >= items.length) return;
+        try {
+          results[index] = { value: await fn(items[index]) };
+        } catch (error) {
+          results[index] = { error };
+        }
+      }
+    };
+    const size = Math.max(1, Math.min(limit, items.length));
+    await Promise.all(Array.from({ length: size }, () => worker()));
+    return results;
+  }
+
+  /**
+   * Snapshot every discovered repository, keeping one failure local. When
+   * `freshRoot` is given, only that repository is re-read aggressively; the
+   * others reuse the switcher cache for a few seconds.
+   */
+  async function readWorkspaceRepositories(repos, signal, freshRoot) {
+    const freshKey = freshRoot ? cacheKey(freshRoot) : null;
+    const outcomes = await mapLimit(repos, REPO_READ_CONCURRENCY, (repo) => {
+      const maxAge = freshKey && cacheKey(repo.root) !== freshKey ? SUMMARY_TTL : STATUS_LITE_TTL;
+      return readRepoSnapshot(repo.root, signal, maxAge);
+    });
+    return outcomes.map((outcome, index) => {
+      const repo = repos[index];
+      if (outcome && outcome.value) return { repo, snapshot: outcome.value, error: null };
+      const error = outcome ? outcome.error : null;
+      return {
+        repo,
+        snapshot: null,
+        error: error instanceof GitError ? error.code : 'INTERNAL',
+      };
+    });
+  }
+
+  /** Aggregate file status for the whole workspace, for the tree and sidebar. */
+  async function readStatusLite(workspacePath, signal) {
+    const workspaceRoot = resolve(workspacePath);
+    const repos = await listRepositories(workspaceRoot, signal);
+    if (repos.length === 0) return { isRepo: false, workspaceRoot, repos: [] };
+
+    const results = await readWorkspaceRepositories(repos, signal);
+    const summaries = [];
+    const entries = [];
+    const counts = emptyCounts();
+    for (const { repo, snapshot, error } of results) {
+      summaries.push(summarizeRepository(repo, snapshot, error));
+      if (!snapshot) continue;
+      for (const entry of snapshot.entries) entries.push({ ...entry, repo: repo.root });
+      addCounts(counts, snapshot.counts);
+    }
+
+    const primary = primaryRepository(repos);
+    const primarySummary = summaries.find((summary) => summary.root === primary.root) || summaries[0];
+    return {
+      isRepo: true,
+      workspaceRoot,
+      repoRoot: primary.root,
+      relativePath: primary.relativePath,
+      isBare: primarySummary.isBare,
+      branch: primarySummary.branch,
+      detached: primarySummary.detached,
+      upstream: primarySummary.upstream,
+      ahead: primarySummary.ahead,
+      behind: primarySummary.behind,
+      repos: summaries,
+      entries,
+      counts,
+    };
   }
 
   async function readBranch(root, signal) {
@@ -523,88 +899,109 @@ export function apply(ctx) {
     return value;
   }
 
-  async function readStatus(workspacePath, signal) {
-    const repoRoot = await resolveRepoRoot(workspacePath, signal);
-    if (!repoRoot) {
-      return { isRepo: false, workspaceRoot: workspacePath };
+  /** Per-file `+additions/-deletions` for the work tree or the index. */
+  async function readNumstat(root, cached, signal) {
+    const args = ['diff', '--numstat', '--no-renames', '-z'];
+    if (cached) args.push('--cached');
+    args.push('--');
+    const result = await runGit(root, args, { signal, timeoutMs: 20_000 });
+    const stats = new Map();
+    if (result.code !== 0) return stats;
+    for (const record of result.stdout.split('\0')) {
+      if (!record) continue;
+      const [added, deleted, filePath] = record.split('\t');
+      if (!filePath) continue;
+      stats.set(filePath, {
+        additions: added === '-' ? 0 : Number(added) || 0,
+        deletions: deleted === '-' ? 0 : Number(deleted) || 0,
+      });
     }
+    return stats;
+  }
 
-    const rootKey = cacheKey(repoRoot);
-    let isBare = cacheRead(bareCache, rootKey, REPO_ROOT_TTL);
-    if (isBare === undefined) {
-      const bare = await runGit(repoRoot, ['rev-parse', '--is-bare-repository'], { signal, timeoutMs: 10_000 });
-      isBare = bare.code === 0 && bare.stdout.trim() === 'true';
-      cacheWrite(bareCache, rootKey, isBare);
+  /** Full status of one repository: file entries plus stats, remotes, identity. */
+  async function readRepoStatus(repoRoot, signal) {
+    const snapshot = await readRepoSnapshot(repoRoot, signal);
+    if (snapshot.isBare) {
+      return { ...snapshot, remotes: [], identity: { name: null, email: null } };
     }
-    if (isBare) {
-      return { isRepo: true, isBare: true, workspaceRoot: workspacePath, repoRoot };
-    }
-
-    // `--branch` folds branch, upstream, ahead/behind into the same porcelain
-    // read, so a full status no longer spawns `symbolic-ref` + `rev-list`.
-    const status = await runGit(repoRoot, [
-      'status', '--porcelain=v1', '-z', '--branch', '--untracked-files=all', '--no-renames', '--', '.',
-    ], { signal, timeoutMs: STATUS_TIMEOUT });
-
-    if (status.code !== 0) {
-      throw new GitError('STATUS_FAILED', status.stderr.trim() || 'git status 执行失败', status.stdout.trim());
-    }
-
-    const records = status.stdout.split('\0');
-    const hasHeader = records.length > 0 && records[0].startsWith('## ');
-    const branchInfo = hasHeader
-      ? parseBranchHeader(records[0])
-      : { branch: null, detached: false, hasCommits: true, upstream: null, ahead: 0, behind: 0 };
-    const entries = parseStatus(hasHeader ? records.slice(1).join('\0') : status.stdout);
-
-    statusLiteValues.set(rootKey, {
-      at: Date.now(),
-      value: { isRepo: true, isBare: false, workspaceRoot: workspacePath, repoRoot, entries },
+    const [aux, unstagedStats, stagedStats] = await Promise.all([
+      readAux(repoRoot, signal),
+      readNumstat(repoRoot, false, signal),
+      readNumstat(repoRoot, true, signal),
+    ]);
+    const entries = snapshot.entries.map((entry) => {
+      const staged = entry.staged ? stagedStats.get(entry.path) : null;
+      const unstaged = !entry.staged || entry.partial ? unstagedStats.get(entry.path) : null;
+      if (!staged && !unstaged) return entry;
+      return {
+        ...entry,
+        additions: (staged ? staged.additions : 0) + (unstaged ? unstaged.additions : 0),
+        deletions: (staged ? staged.deletions : 0) + (unstaged ? unstaged.deletions : 0),
+      };
     });
+    return { ...snapshot, ...aux, entries };
+  }
 
-    const { remotes, identity } = await readAux(repoRoot, signal);
+  /** Resolve the repository a scoped operation targets. */
+  async function operationRepo(workspacePath, repoValue, signal) {
+    const workspaceRoot = resolve(workspacePath);
+    const repos = await listRepositories(workspaceRoot, signal);
+    return requireRepositoryForOperation(workspaceRoot, repos, repoValue);
+  }
 
-    let stagedCount = 0;
-    let unstagedCount = 0;
-    let conflictCount = 0;
-    let untrackedCount = 0;
-    for (const entry of entries) {
-      if (entry.conflict) conflictCount += 1;
-      if (entry.kind === 'untracked') untrackedCount += 1;
-      if (entry.staged || entry.partial) stagedCount += 1;
-      if (!entry.staged || entry.partial) unstagedCount += 1;
+  /**
+   * Status for the workbench: the selected repository carries the full status,
+   * while every discovered repository contributes a switcher summary. With no
+   * selection the primary repository (the workspace root one) is used.
+   */
+  async function readStatus(workspacePath, repoValue, signal) {
+    const workspaceRoot = resolve(workspacePath);
+    const repos = await listRepositories(workspaceRoot, signal);
+    if (repos.length === 0) return { isRepo: false, workspaceRoot, repos: [] };
+
+    const selected = repoValue == null || repoValue === ''
+      ? primaryRepository(repos)
+      : findRepository(workspaceRoot, repos, repoValue);
+    if (!selected) throw new GitError('REPO_NOT_FOUND', '该仓库不在当前工作区内');
+
+    const results = await readWorkspaceRepositories(repos, signal, selected.root);
+    const summaries = results.map(({ repo, snapshot, error }) => summarizeRepository(repo, snapshot, error));
+    const current = results.find((item) => item.repo.root === selected.root);
+    if (!current || !current.snapshot) {
+      if (current && current.error === 'CANCELLED') throw new GitError('CANCELLED', '操作已取消');
+      throw new GitError('STATUS_FAILED', '读取 Git 状态失败', current ? current.error : null);
     }
 
+    const snapshot = await readRepoStatus(selected.root, signal);
+    const primary = primaryRepository(repos);
     return {
       isRepo: true,
-      isBare: false,
-      workspaceRoot: workspacePath,
-      repoRoot,
-      ...branchInfo,
+      workspaceRoot,
+      repos: summaries,
+      primary: primary ? primary.root : selected.root,
+      ...snapshot,
+      repoRoot: selected.root,
+      relativePath: selected.relativePath,
       head: null,
-      remotes,
-      identity,
-      entries,
-      counts: {
-        changed: entries.length,
-        staged: stagedCount,
-        unstaged: unstagedCount,
-        conflicts: conflictCount,
-        untracked: untrackedCount,
-      },
     };
   }
 
-  async function readGraph(workspacePath, signal) {
-    const status = await readStatus(workspacePath, signal);
-    if (!status.isRepo || status.isBare) return { commits: [] };
-    const root = status.repoRoot;
+  /** Commit list with graph data; `limit`/`skip` page the history. */
+  async function readGraph(workspacePath, repoValue, payload, signal) {
+    const root = await operationRepo(workspacePath, repoValue, signal);
+    const snapshot = await readRepoSnapshot(root, signal);
+    if (snapshot.isBare) return { commits: [], hasMore: false };
 
-    const log = await runGit(root, [
-      'log', '--topo-order', '--format=%H%x00%P%x00%an%x00%at%x00%s', '-n', '200', '--all',
-    ], { signal, timeoutMs: 30_000 });
+    const limit = Math.min(Math.max(Number(payload && payload.limit) || 200, 1), 500);
+    const skip = Math.max(Number(payload && payload.skip) || 0, 0);
+    const logArgs = [
+      'log', '--topo-order', '--format=%H%x00%P%x00%an%x00%at%x00%s', '-n', String(limit + 1), '--all',
+    ];
+    if (skip > 0) logArgs.push(`--skip=${skip}`);
+    const log = await runGit(root, logArgs, { signal, timeoutMs: 30_000 });
 
-    if (log.code !== 0) return { commits: [] };
+    if (log.code !== 0) return { commits: [], hasMore: false };
 
     const commits = [];
     for (const line of log.stdout.split('\n')) {
@@ -622,6 +1019,11 @@ export function apply(ctx) {
       });
     }
 
+    const hasMore = commits.length > limit;
+    if (hasMore) commits.length = limit;
+
+    // Refs are read for the visible page only; `skip` pages are appended by the
+    // client, so a later page still carries its own refs.
     const refsResult = await runGit(root, [
       'for-each-ref', '--format=%(objectname)%00%(refname)%00%(HEAD)',
       'refs/heads', 'refs/remotes', 'refs/tags',
@@ -633,59 +1035,161 @@ export function apply(ctx) {
         if (!line) continue;
         const [oid, refname, head] = line.split('\0');
         if (!oid || !refname) continue;
-        let label;
-        if (refname.startsWith('refs/heads/')) label = refname.slice('refs/heads/'.length);
-        else if (refname.startsWith('refs/remotes/')) {
+        let name;
+        let kind;
+        if (refname.startsWith('refs/heads/')) {
+          name = refname.slice('refs/heads/'.length);
+          kind = 'local';
+        } else if (refname.startsWith('refs/remotes/')) {
           if (refname.endsWith('/HEAD')) continue;
-          label = refname.slice('refs/remotes/'.length);
-        } else if (refname.startsWith('refs/tags/')) label = `tag: ${refname.slice('refs/tags/'.length)}`;
-        else continue;
-        if (head === '*') label = `HEAD -> ${label}`;
+          name = refname.slice('refs/remotes/'.length);
+          kind = 'remote';
+        } else if (refname.startsWith('refs/tags/')) {
+          name = refname.slice('refs/tags/'.length);
+          kind = 'tag';
+        } else {
+          continue;
+        }
+        if (head === '*') kind = 'head';
         const list = refsBySha.get(oid) || [];
-        list.push(label);
+        list.push({ name, kind });
         refsBySha.set(oid, list);
       }
-      const rank = (ref) => (ref.startsWith('HEAD ->') ? 0 : ref.startsWith('tag:') ? 1 : 2);
+      const rank = { head: 0, tag: 1, local: 2, remote: 3 };
       for (const commit of commits) {
-        const refs = (refsBySha.get(commit.sha) || []).sort((a, b) => rank(a) - rank(b));
-        commit.refs = refs.slice(0, 4);
+        const refs = (refsBySha.get(commit.sha) || []).sort((a, b) => rank[a.kind] - rank[b.kind]);
+        commit.refs = refs.slice(0, 5);
       }
     }
 
-    return { commits };
+    return { commits, hasMore };
   }
 
-  async function readCommit(workspacePath, shaValue, signal) {
-    const status = await readStatus(workspacePath, signal);
-    if (!status.isRepo) throw new GitError('NOT_A_REPO', '当前工作区不是 Git 仓库');
-    const root = status.repoRoot;
-    const sha = safeSha(shaValue);
+  /** Changed files of a commit, without rename pairs (one path per entry). */
+  async function readCommitFiles(root, sha, signal) {
+    const [numstat, nameStatus] = await Promise.all([
+      runGit(root, ['show', '--numstat', '--format=', '--no-renames', sha], { signal, timeoutMs: 20_000 }),
+      runGit(root, ['show', '--name-status', '--format=', '--no-renames', sha], { signal, timeoutMs: 20_000 }),
+    ]);
+
+    const statusByPath = new Map();
+    if (nameStatus.code === 0) {
+      for (const line of nameStatus.stdout.split('\n')) {
+        if (!line) continue;
+        const [status, filePath] = line.split('\t');
+        if (status && filePath) statusByPath.set(filePath, status.charAt(0));
+      }
+    }
+
+    const files = [];
+    let additions = 0;
+    let deletions = 0;
+    if (numstat.code === 0) {
+      for (const line of numstat.stdout.split('\n')) {
+        if (!line) continue;
+        const [added, deleted, filePath] = line.split('\t');
+        if (!filePath) continue;
+        const binary = added === '-' || deleted === '-';
+        const adds = binary ? 0 : Number(added) || 0;
+        const dels = binary ? 0 : Number(deleted) || 0;
+        additions += adds;
+        deletions += dels;
+        files.push({
+          path: filePath,
+          status: statusByPath.get(filePath) || 'M',
+          additions: adds,
+          deletions: dels,
+          binary,
+        });
+      }
+    }
+
+    return { files, stats: { files: files.length, additions, deletions } };
+  }
+
+  /**
+   * Commit detail. With `path` it returns only that file's patch, which lets the
+   * details pane show one file at a time instead of dumping the whole commit.
+   */
+  /** Turn the origin remote into a browsable commit URL (GitHub/GitLab/Gitee). */
+  function commitWebUrl(remoteUrl, sha) {
+    let url = String(remoteUrl || '').trim();
+    if (!url) return null;
+    if (url.startsWith('git@')) {
+      const match = /^git@([^:]+):(.+)$/.exec(url);
+      if (!match) return null;
+      url = `https://${match[1]}/${match[2]}`;
+    } else if (url.startsWith('ssh://')) {
+      try {
+        const parsed = new URL(url);
+        url = `https://${parsed.hostname}${parsed.pathname}`;
+      } catch {
+        return null;
+      }
+    } else if (url.startsWith('http://')) {
+      url = url.replace(/^http:\/\//, 'https://');
+    }
+    url = url.replace(/\.git$/, '').replace(/\/+$/, '');
+    if (!/^https:\/\/[^/]+\/.+/.test(url)) return null;
+    const host = (() => {
+      try { return new URL(url).hostname.toLowerCase(); } catch { return ''; }
+    })();
+    if (!host) return null;
+    const suffix = host.includes('bitbucket') ? `/commits/${sha}` : `/commit/${sha}`;
+    return { url: `${url}${suffix}`, host };
+  }
+  async function readCommit(workspacePath, repoValue, payload, signal) {
+    const root = await operationRepo(workspacePath, repoValue, signal);
+    const sha = safeSha(payload.sha);
+    const onlyPath = typeof payload.path === 'string' && payload.path
+      ? safeRepoPath(root, payload.path)
+      : null;
 
     const meta = await runGit(root, [
-      'show', '-s', '--format=%H%x00%an%x00%at%x00%s%x00%b', sha,
+      'show', '-s', '--format=%H%x00%an%x00%ae%x00%at%x00%P%x00%s%x00%b', sha,
     ], { signal, timeoutMs: 20_000 });
     if (meta.code !== 0) throw new GitError('COMMIT_NOT_FOUND', meta.stderr.trim() || '提交不存在');
 
-    const [oid, author, timestamp, subject, ...bodyParts] = meta.stdout.split('\0');
-    const patch = await runGit(root, [
-      'show', '--no-color', '--no-ext-diff', '--format=', '--stat', '--patch', sha,
-    ], { signal, timeoutMs: 30_000 });
+    const [oid, author, email, timestamp, parentsText, subject, ...bodyParts] = meta.stdout.split('\0');
+
+    if (onlyPath) {
+      const filePatch = await runGit(root, [
+        'show', '--no-color', '--no-ext-diff', '--format=', sha, '--', onlyPath,
+      ], { signal, timeoutMs: 30_000 });
+      if (filePatch.code !== 0) {
+        throw new GitError('GIT_COMMAND_FAILED', filePatch.stderr.trim() || '读取文件差异失败');
+      }
+      return {
+        sha: oid || sha,
+        path: onlyPath,
+        patch: filePatch.stdout || '',
+        truncated: filePatch.stdout.length >= MAX_OUTPUT - 1,
+      };
+    }
+
+    const [filesResult, patch, remote] = await Promise.all([
+      readCommitFiles(root, sha, signal),
+      runGit(root, ['show', '--no-color', '--no-ext-diff', '--format=', sha], { signal, timeoutMs: 30_000 }),
+      runGit(root, ['remote', 'get-url', 'origin'], { signal, timeoutMs: 10_000 }),
+    ]);
 
     return {
       sha: oid || sha,
       author: author || '',
+      email: email || '',
       timestamp: Number(timestamp) || 0,
       subject: subject || '',
       body: bodyParts.join('\0').trim(),
+      parents: (parentsText || '').split(' ').filter(Boolean),
+      files: filesResult.files,
+      stats: filesResult.stats,
+      webUrl: commitWebUrl(remote.code === 0 ? remote.stdout : '', oid || sha),
       patch: patch.stdout || '',
       truncated: patch.stdout.length >= MAX_OUTPUT - 1,
     };
   }
-
-  async function readDiff(workspacePath, payload, signal) {
-    const status = await readStatus(workspacePath, signal);
-    if (!status.isRepo) throw new GitError('NOT_A_REPO', '当前工作区不是 Git 仓库');
-    const root = status.repoRoot;
+  async function readDiff(workspacePath, repoValue, payload, signal) {
+    const root = await operationRepo(workspacePath, repoValue, signal);
     const path = safeRepoPath(root, payload.path);
     const args = ['diff', '--no-color', '--no-ext-diff'];
     if (payload.staged === true) args.push('--cached');
@@ -695,10 +1199,8 @@ export function apply(ctx) {
     return { text: diff.stdout, truncated: diff.stdout.length >= MAX_OUTPUT - 1 };
   }
 
-  async function stagePaths(workspacePath, pathsValue, signal) {
-    const status = await readStatus(workspacePath, signal);
-    if (!status.isRepo) throw new GitError('NOT_A_REPO', '当前工作区不是 Git 仓库');
-    const root = status.repoRoot;
+  async function stagePaths(workspacePath, repoValue, pathsValue, signal) {
+    const root = await operationRepo(workspacePath, repoValue, signal);
     if (!Array.isArray(pathsValue) || pathsValue.length === 0) return { staged: 0 };
     const paths = pathsValue.map((value) => safeRepoPath(root, value));
 
@@ -711,10 +1213,8 @@ export function apply(ctx) {
     return { staged: paths.length };
   }
 
-  async function unstagePaths(workspacePath, pathsValue, signal) {
-    const status = await readStatus(workspacePath, signal);
-    if (!status.isRepo) throw new GitError('NOT_A_REPO', '当前工作区不是 Git 仓库');
-    const root = status.repoRoot;
+  async function unstagePaths(workspacePath, repoValue, pathsValue, signal) {
+    const root = await operationRepo(workspacePath, repoValue, signal);
     if (!Array.isArray(pathsValue) || pathsValue.length === 0) return { unstaged: 0 };
     const paths = pathsValue.map((value) => safeRepoPath(root, value));
 
@@ -733,10 +1233,9 @@ export function apply(ctx) {
     return { unstaged: paths.length };
   }
 
-  async function commit(workspacePath, payload, signal) {
-    const status = await readStatus(workspacePath, signal);
-    if (!status.isRepo) throw new GitError('NOT_A_REPO', '当前工作区不是 Git 仓库');
-    const root = status.repoRoot;
+  async function commit(workspacePath, repoValue, payload, signal) {
+    const root = await operationRepo(workspacePath, repoValue, signal);
+    const status = await readRepoStatus(root, signal);
 
     const message = typeof payload.message === 'string' ? payload.message : '';
     if (!message.trim()) throw new GitError('EMPTY_MESSAGE', '提交信息不能为空');
@@ -813,51 +1312,56 @@ export function apply(ctx) {
     return new GitError('GIT_COMMAND_FAILED', result.stderr.trim() || result.stdout.trim() || 'Git 命令失败', text);
   }
 
-  async function fetchRemote(workspacePath, signal) {
-    const status = await readStatus(workspacePath, signal);
-    if (!status.isRepo) throw new GitError('NOT_A_REPO', '当前工作区不是 Git 仓库');
+  async function fetchRemote(workspacePath, repoValue, signal) {
+    const root = await operationRepo(workspacePath, repoValue, signal);
+    const status = await readRepoStatus(root, signal);
     if (status.remotes.length === 0) throw new GitError('NO_REMOTE', '没有配置远程仓库');
-    const result = await runGit(status.repoRoot, ['fetch', '--all'], { signal, timeoutMs: REMOTE_TIMEOUT });
+    const result = await runGit(root, ['fetch', '--all'], { signal, timeoutMs: REMOTE_TIMEOUT });
     if (result.code !== 0) throw remoteFailure(result);
     return { output: `${result.stdout}\n${result.stderr}`.trim() };
   }
 
-  async function pullRemote(workspacePath, signal) {
-    const status = await readStatus(workspacePath, signal);
-    if (!status.isRepo) throw new GitError('NOT_A_REPO', '当前工作区不是 Git 仓库');
+  async function pullRemote(workspacePath, repoValue, signal) {
+    const root = await operationRepo(workspacePath, repoValue, signal);
+    const status = await readRepoStatus(root, signal);
     if (!status.branch) throw new GitError('DETACHED_HEAD', '分离 HEAD 状态下无法拉取');
     const hasUpstream = Boolean(status.upstream);
     const args = ['pull', '--no-edit'];
     if (!hasUpstream) {
-      const remote = await remoteForBranch(status.repoRoot, status.branch, signal);
+      const remote = await remoteForBranch(root, status.branch, signal);
       args.push(remote, safeRef(status.branch));
     }
-    const result = await runGit(status.repoRoot, args, { signal, timeoutMs: REMOTE_TIMEOUT });
+    const result = await runGit(root, args, { signal, timeoutMs: REMOTE_TIMEOUT });
     if (result.code !== 0) throw remoteFailure(result);
     return { output: `${result.stdout}\n${result.stderr}`.trim() };
   }
 
-  async function pushRemote(workspacePath, signal) {
-    const status = await readStatus(workspacePath, signal);
-    if (!status.isRepo) throw new GitError('NOT_A_REPO', '当前工作区不是 Git 仓库');
+  async function pushRemote(workspacePath, repoValue, signal) {
+    const root = await operationRepo(workspacePath, repoValue, signal);
+    const status = await readRepoStatus(root, signal);
     if (!status.branch) throw new GitError('DETACHED_HEAD', '分离 HEAD 状态下无法推送');
 
-    const upstream = await runGit(status.repoRoot, ['rev-parse', '--verify', '--quiet', '@{u}'], { signal, timeoutMs: 10_000 });
+    const upstream = await runGit(root, ['rev-parse', '--verify', '--quiet', '@{u}'], { signal, timeoutMs: 10_000 });
     const args = ['push', '--porcelain'];
     if (upstream.code !== 0) {
-      const remote = await remoteForBranch(status.repoRoot, status.branch, signal);
+      const remote = await remoteForBranch(root, status.branch, signal);
       args.push('-u', remote, `${safeRef(status.branch)}:${safeRef(status.branch)}`);
     }
-    const result = await runGit(status.repoRoot, args, { signal, timeoutMs: REMOTE_TIMEOUT });
+    const result = await runGit(root, args, { signal, timeoutMs: REMOTE_TIMEOUT });
     if (result.code !== 0) throw remoteFailure(result);
     return { output: `${result.stdout}\n${result.stderr}`.trim() };
   }
 
   async function initRepo(workspacePath, signal) {
     const root = requireWorkspace(workspacePath);
+    // The workspace may already be a repository, or may be a plain folder that
+    // collects independent projects; `git init` only ever targets its root, so
+    // the discovered list has to be re-read afterwards.
+    invalidateWorkspace(root);
     const check = await runGit(root, ['rev-parse', '--is-inside-work-tree'], { signal, timeoutMs: 10_000 });
     if (check.code === 0 && check.stdout.trim() === 'true') {
-      return readStatus(root, signal);
+      invalidateWorkspace(root);
+      return readStatus(root, null, signal);
     }
     invalidateRepo(root);
     let result = await runGit(root, ['init', '-b', 'main'], { signal, timeoutMs: WRITE_TIMEOUT });
@@ -866,7 +1370,114 @@ export function apply(ctx) {
       if (result.code !== 0) throw new GitError('INIT_FAILED', result.stderr.trim() || '初始化仓库失败');
       await runGit(root, ['symbolic-ref', 'HEAD', 'refs/heads/main'], { signal, timeoutMs: 10_000 });
     }
-    return readStatus(root, signal);
+    invalidateWorkspace(root);
+    return readStatus(root, null, signal);
+  }
+
+  /**
+   * Branches of one repository, split into local and remote, like Zed's
+   * switcher. Remote names keep the `<remote>/` prefix so a branch can be
+   * checked out with a tracking local branch.
+   */
+  async function readBranches(workspacePath, repoValue, signal) {
+    const root = await operationRepo(workspacePath, repoValue, signal);
+    const snapshot = await readRepoSnapshot(root, signal);
+    if (snapshot.isBare) return { local: [], remote: [], current: null, upstream: null, detached: false };
+
+    const [localResult, remoteResult] = await Promise.all([
+      runGit(root, ['for-each-ref', '--format=%(refname:short)%00%(HEAD)', 'refs/heads'], { signal, timeoutMs: 15_000 }),
+      runGit(root, ['for-each-ref', '--format=%(refname:short)%00%(symref)', 'refs/remotes'], { signal, timeoutMs: 15_000 }),
+    ]);
+    if (localResult.code !== 0) {
+      throw new GitError('GIT_COMMAND_FAILED', localResult.stderr.trim() || '读取分支失败');
+    }
+    if (remoteResult.code !== 0) {
+      throw new GitError('GIT_COMMAND_FAILED', remoteResult.stderr.trim() || '读取远端分支失败');
+    }
+
+    const local = [];
+    for (const line of localResult.stdout.split('\n')) {
+      if (!line) continue;
+      const [name, head] = line.split('\0');
+      if (!name) continue;
+      local.push({ name, current: head === '*' });
+    }
+    local.sort((a, b) => (b.current - a.current) || a.name.localeCompare(b.name));
+
+    const remotes = (await readAux(root, signal)).remotes;
+    const longestFirst = remotes.slice().sort((a, b) => b.length - a.length);
+    const remote = [];
+    for (const line of remoteResult.stdout.split('\n')) {
+      if (!line) continue;
+      const [name, symref] = line.split('\0');
+      if (!name) continue;
+      // `refs/remotes/origin/HEAD` is a symbolic alias, not a branch.
+      if (symref) continue;
+      const remoteName = longestFirst.find((item) => name === item || name.startsWith(`${item}/`)) || '';
+      const shortName = remoteName ? name.slice(remoteName.length + 1) : name;
+      if (!shortName) continue;
+      remote.push({ name, remote: remoteName, branch: shortName });
+    }
+    remote.sort((a, b) => a.name.localeCompare(b.name));
+
+    return {
+      local,
+      remote,
+      current: snapshot.branch || null,
+      upstream: snapshot.upstream || null,
+      detached: Boolean(snapshot.detached),
+    };
+  }
+
+  function checkoutFailure(text) {
+    if (/local changes would be overwritten|would be overwritten by checkout|Please commit your changes or stash/i.test(text)) {
+      return new GitError('CHECKOUT_DIRTY', '本地更改会被覆盖，请先提交或暂存后再切换分支', text);
+    }
+    if (/not a git repository/i.test(text)) {
+      return new GitError('NOT_A_REPO', '当前工作区不是 Git 仓库', text);
+    }
+    return new GitError('CHECKOUT_FAILED', text || '切换分支失败', text);
+  }
+
+  /**
+   * Switch branches. A remote branch without a local counterpart is checked
+   * out with `--track`, which creates the tracking branch. Git itself refuses
+   * the move when the working tree would be overwritten, so the error surfaces
+   * as a checkout conflict instead of a silently discarded file.
+   */
+  async function checkoutBranch(workspacePath, repoValue, payload, signal) {
+    const root = await operationRepo(workspacePath, repoValue, signal);
+    const branch = safeRef(payload.branch);
+    const remoteBranch = typeof payload.remoteBranch === 'string' && payload.remoteBranch
+      ? safeRef(payload.remoteBranch)
+      : null;
+
+    if (remoteBranch) {
+      const remoteExists = await runGit(root, [
+        'rev-parse', '--verify', '--quiet', `refs/remotes/${remoteBranch}`,
+      ], { signal, timeoutMs: 10_000 });
+      if (remoteExists.code !== 0) throw new GitError('BRANCH_NOT_FOUND', '远端分支不存在', remoteBranch);
+    }
+
+    const localExists = (await runGit(root, [
+      'rev-parse', '--verify', '--quiet', `refs/heads/${branch}`,
+    ], { signal, timeoutMs: 10_000 })).code === 0;
+
+    if (!remoteBranch && !localExists) throw new GitError('BRANCH_NOT_FOUND', '分支不存在', branch);
+
+    let result;
+    let created = false;
+    if (remoteBranch && !localExists) {
+      result = await runGit(root, ['checkout', '--quiet', '--track', remoteBranch], { signal, timeoutMs: REMOTE_TIMEOUT });
+      created = result.code === 0;
+    } else {
+      result = await runGit(root, ['checkout', '--quiet', branch], { signal, timeoutMs: REMOTE_TIMEOUT });
+    }
+    if (result.code !== 0) throw checkoutFailure(`${result.stderr}\n${result.stdout}`.trim());
+
+    invalidateRepo(root);
+    const head = await runGit(root, ['symbolic-ref', '--quiet', '--short', 'HEAD'], { signal, timeoutMs: 10_000 });
+    return { branch: head.code === 0 ? head.stdout.trim() : branch, created };
   }
 
   async function dispatch(payload, signal) {
@@ -884,27 +1495,31 @@ export function apply(ctx) {
 
     switch (op) {
       case 'status':
-        return readStatus(workspace, signal);
+        return readStatus(workspace, body.repo, signal);
       case 'status-lite':
         return readStatusLite(workspace, signal);
       case 'graph':
-        return readGraph(workspace, signal);
+        return readGraph(workspace, body.repo, body, signal);
+      case 'branches':
+        return readBranches(workspace, body.repo, signal);
+      case 'checkout':
+        return checkoutBranch(workspace, body.repo, body, signal);
       case 'commit-detail':
-        return readCommit(workspace, body.sha, signal);
+        return readCommit(workspace, body.repo, body, signal);
       case 'diff':
-        return readDiff(workspace, body, signal);
+        return readDiff(workspace, body.repo, body, signal);
       case 'stage':
-        return stagePaths(workspace, body.paths, signal);
+        return stagePaths(workspace, body.repo, body.paths, signal);
       case 'unstage':
-        return unstagePaths(workspace, body.paths, signal);
+        return unstagePaths(workspace, body.repo, body.paths, signal);
       case 'commit':
-        return commit(workspace, body, signal);
+        return commit(workspace, body.repo, body, signal);
       case 'fetch':
-        return fetchRemote(workspace, signal);
+        return fetchRemote(workspace, body.repo, signal);
       case 'pull':
-        return pullRemote(workspace, signal);
+        return pullRemote(workspace, body.repo, signal);
       case 'push':
-        return pushRemote(workspace, signal);
+        return pushRemote(workspace, body.repo, signal);
       case 'init':
         return initRepo(workspace, signal);
       default:
