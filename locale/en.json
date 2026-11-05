@@ -1,6 +1,6 @@
 {
   "meta": {
     "title": "Git Workbench",
-    "description": "Discovers every Git repository in the workspace, including independent projects in subfolders, then shows status and history and stages, commits, pulls, and pushes."
+    "description": "Discovers every Git repository in the workspace, shows status and the commit graph, creates branches and isolated worktree sessions, and stages, commits, pulls, and pushes."
   }
 }

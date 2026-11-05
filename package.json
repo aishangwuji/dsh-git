@@ -3,7 +3,7 @@
   "version": "0.1.0",
   "private": true,
   "type": "module",
-  "description": "A Git workbench for DSH workspaces: colored file status, changes tree, commit graph, and fetch/pull/push/commit actions.",
+  "description": "A Git workbench for DSH workspaces: colored file status, changes tree, commit graph, branch creation, isolated worktree sessions, and fetch/pull/push/commit actions.",
   "exports": {
     ".": "./index.js",
     "./client": "./client.js",

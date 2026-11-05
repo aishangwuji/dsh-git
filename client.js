@@ -19,6 +19,13 @@ window.__ModuleLoader__.load({
     ];
 
     let t = (key) => key;
+    /**
+     * Workspace/session bridge filled by `ctx.inject(['workspaces',
+     * 'uiWorkspace'])` in apply(). Keeping it module-level lets the panel stay
+     * usable in shells that omit those services, while the worktree flow can
+     * report a readable error instead of crashing the panel.
+     */
+    let worktreeBridge = null;
 
     const zh = {
       panel: 'Git 工作台',
@@ -118,6 +125,42 @@ window.__ModuleLoader__.load({
       branchSwitched: '已切换到 {branch}',
       branchTrackingCreated: '已基于 {branch} 创建本地分支',
       checkingOut: '正在切换分支…',
+      branchCreateAction: '创建并检出新分支...',
+      branchGraphAction: 'Git 图谱',
+      worktreeCreateAction: '在 worktree 中开始新会话...',
+      worktreeManageAction: '管理 worktree...',
+      branchCreateTitle: '创建并检出新分支',
+      branchCreateDesc: '基于当前 HEAD 创建一个新的本地分支，并在创建成功后立即切换过去。',
+      branchNameLabel: '分支名',
+      branchNamePlaceholder: '例如 feature/git-branch-switcher',
+      cancel: '取消',
+      createAndCheckout: '创建并切换',
+      creatingBranch: '正在创建分支…',
+      branchCreated: '已创建并切换到 {branch}',
+      invalidBranchName: '分支名不合法',
+      gitGraphTitle: 'Git 图谱',
+      gitGraphSubtitle: '{count} 个提交，{lanes} 条泳道',
+      gitGraphLoading: '正在加载提交…',
+      gitGraphLoadMore: '加载更多',
+      worktreeCreateTitle: '在 worktree 中开始新会话',
+      worktreeCreateDesc: '在 DSH 托管目录（$DSH_HOME/worktrees/）创建隔离 worktree，携带新分支 wt/<名称>，并在其中打开新会话。当前检出不受影响。',
+      worktreeNameLabel: 'worktree 名称',
+      worktreeNamePlaceholder: '例如 fix-login-race',
+      worktreeBaseLabel: '基线分支',
+      worktreeStart: '创建并开始会话',
+      worktreeStarting: '正在创建 worktree…',
+      worktreeNoBase: '当前仓库还没有可用的本地分支',
+      worktreeCreated: '已在 {name} 中开始新会话',
+      worktreeManagerTitle: 'Worktree 管理',
+      worktreeEmpty: '没有托管的 worktree',
+      worktreeMain: '主检出',
+      worktreeDetached: '分离 HEAD',
+      worktreeRemove: '移除',
+      worktreeDeleteBranch: '同时删除分支',
+      worktreeForceConfirm: '该 worktree 有未提交的更改，仍要移除？',
+      worktreeForceYes: '强制移除',
+      worktreeRemoved: '已移除 worktree',
+      worktreeUnmanaged: '非托管',
       repoCount: '{count} 个仓库',
       repoGroupChanged: '有更改',
       repoGroupProjects: '项目',
@@ -150,6 +193,19 @@ window.__ModuleLoader__.load({
       err_BRANCH_NOT_FOUND: '分支不存在',
       err_CHECKOUT_DIRTY: '本地更改会被覆盖，请先提交或暂存后再切换分支',
       err_CHECKOUT_FAILED: '切换分支失败',
+      err_BRANCH_ALREADY_EXISTS: '分支已存在',
+      err_BRANCH_CREATE_FAILED: '创建分支失败',
+      err_WORKTREE_NAME_INVALID: 'worktree 名称不合法',
+      err_WORKTREE_PATH_EXISTS: '目标 worktree 目录已存在',
+      err_WORKTREE_ADD_FAILED: '创建 worktree 失败',
+      err_WORKTREE_LIST_FAILED: '读取 worktree 失败',
+      err_WORKTREE_BASE_NOT_FOUND: '基线分支不存在',
+      err_WORKTREE_NOT_FOUND: 'worktree 不存在',
+      err_WORKTREE_IS_MAIN: '不能移除主检出',
+      err_WORKTREE_NOT_MANAGED: '只能移除由面板托管的 worktree',
+      err_WORKTREE_DIRTY: 'worktree 中还有未提交的更改',
+      err_WORKTREE_REMOVE_FAILED: '移除 worktree 失败',
+      err_WORKTREE_SERVICE_UNAVAILABLE: '当前界面没有提供工作区服务，无法打开新会话',
       err_STATUS_FAILED: '读取 Git 状态失败',
       err_REPO_ROOT_FAILED: '无法确定仓库根目录',
       err_GIT_TIMEOUT: 'Git 操作超时',
@@ -287,6 +343,42 @@ window.__ModuleLoader__.load({
       branchSwitched: 'Switched to {branch}',
       branchTrackingCreated: 'Created a local branch from {branch}',
       checkingOut: 'Switching branch…',
+      branchCreateAction: 'Create and check out new branch...',
+      branchGraphAction: 'Git graph',
+      worktreeCreateAction: 'Start a new session in a worktree...',
+      worktreeManageAction: 'Manage worktrees...',
+      branchCreateTitle: 'Create and check out a new branch',
+      branchCreateDesc: 'Create a new local branch from the current HEAD and switch to it immediately.',
+      branchNameLabel: 'Branch name',
+      branchNamePlaceholder: 'e.g. feature/git-branch-switcher',
+      cancel: 'Cancel',
+      createAndCheckout: 'Create and switch',
+      creatingBranch: 'Creating branch…',
+      branchCreated: 'Created and switched to {branch}',
+      invalidBranchName: 'Invalid branch name',
+      gitGraphTitle: 'Git graph',
+      gitGraphSubtitle: '{count} commits, {lanes} lanes',
+      gitGraphLoading: 'Loading commits…',
+      gitGraphLoadMore: 'Load more',
+      worktreeCreateTitle: 'Start a new session in a worktree',
+      worktreeCreateDesc: 'Create an isolated worktree under $DSH_HOME/worktrees/ with a new wt/<name> branch, then start a new session there. The current checkout is untouched.',
+      worktreeNameLabel: 'Worktree name',
+      worktreeNamePlaceholder: 'e.g. fix-login-race',
+      worktreeBaseLabel: 'Base branch',
+      worktreeStart: 'Create and start session',
+      worktreeStarting: 'Creating worktree…',
+      worktreeNoBase: 'This repository has no local branch to use as the base',
+      worktreeCreated: 'Started a new session in {name}',
+      worktreeManagerTitle: 'Worktree manager',
+      worktreeEmpty: 'No managed worktrees',
+      worktreeMain: 'Main checkout',
+      worktreeDetached: 'Detached HEAD',
+      worktreeRemove: 'Remove',
+      worktreeDeleteBranch: 'Delete branch too',
+      worktreeForceConfirm: 'This worktree has uncommitted changes. Remove it anyway?',
+      worktreeForceYes: 'Force remove',
+      worktreeRemoved: 'Removed worktree',
+      worktreeUnmanaged: 'Unmanaged',
       repoCount: '{count} repositories',
       repoGroupChanged: 'Changed',
       repoGroupProjects: 'Projects',
@@ -319,6 +411,19 @@ window.__ModuleLoader__.load({
       err_BRANCH_NOT_FOUND: 'That branch does not exist',
       err_CHECKOUT_DIRTY: 'Local changes would be overwritten; commit or stash them before switching',
       err_CHECKOUT_FAILED: 'Could not switch branches',
+      err_BRANCH_ALREADY_EXISTS: 'That branch already exists',
+      err_BRANCH_CREATE_FAILED: 'Could not create the branch',
+      err_WORKTREE_NAME_INVALID: 'Invalid worktree name',
+      err_WORKTREE_PATH_EXISTS: 'The worktree directory already exists',
+      err_WORKTREE_ADD_FAILED: 'Could not create the worktree',
+      err_WORKTREE_LIST_FAILED: 'Could not read worktrees',
+      err_WORKTREE_BASE_NOT_FOUND: 'The base branch does not exist',
+      err_WORKTREE_NOT_FOUND: 'That worktree does not exist',
+      err_WORKTREE_IS_MAIN: 'The main checkout cannot be removed',
+      err_WORKTREE_NOT_MANAGED: 'Only panel-managed worktrees can be removed',
+      err_WORKTREE_DIRTY: 'The worktree has uncommitted changes',
+      err_WORKTREE_REMOVE_FAILED: 'Could not remove the worktree',
+      err_WORKTREE_SERVICE_UNAVAILABLE: 'This shell does not expose the workspace service, so a new session cannot be opened',
       err_STATUS_FAILED: 'Could not read Git status',
       err_REPO_ROOT_FAILED: 'Could not determine the repository root',
       err_GIT_TIMEOUT: 'Git operation timed out',
@@ -369,11 +474,13 @@ window.__ModuleLoader__.load({
     }
 
     function errorText(error) {
-      const code = error && error.code ? error.code : 'UNKNOWN';
-      const key = `err_${code}`;
-      const translated = t(key);
-      if (translated !== key) return translated;
-      return (error && error.message) || t('err_UNKNOWN');
+      const code = error && error.code ? error.code : null;
+      if (code) {
+        const key = `err_${code}`;
+        const translated = t(key);
+        if (translated !== key) return translated;
+      }
+      return (error && (error.message || (error.rpcError && error.rpcError.message))) || t('err_UNKNOWN');
     }
 
     function cx(...values) {
@@ -480,6 +587,85 @@ window.__ModuleLoader__.load({
       return normalize(left) === normalize(right);
     }
 
+    /** Pure mirror of `git check-ref-format --branch`; the host stays the authority. */
+    function validateBranchName(name) {
+      if (name === '') return 'empty';
+      if (name === '@') return 'at-sign';
+      if (name.startsWith('-')) return 'leading-dash';
+      if (name.endsWith('.')) return 'trailing-dot';
+      if (name.endsWith('.lock')) return 'lock-suffix';
+      if (name.includes('..')) return 'double-dot';
+      if (name.includes('@{')) return 'at-brace';
+      if (name.includes('//')) return 'double-slash';
+      if (/\s/.test(name)) return 'space';
+      if (/[~^:?*[\\]/.test(name)) return 'forbidden-char';
+      if (/[\u0000-\u001f\u007f]/.test(name)) return 'control-char';
+      for (const component of name.split('/')) {
+        if (component === '') return 'empty-component';
+        if (component.startsWith('.')) return 'dot-component';
+        if (component.endsWith('.lock')) return 'lock-suffix';
+      }
+      return null;
+    }
+
+    /** Same normalization as the host: lowercase, safe path/branch component. */
+    function sanitizeWorktreeName(value) {
+      const cleaned = String(value == null ? '' : value).trim().toLowerCase()
+        .replace(/[^a-z0-9._-]+/g, '-')
+        .replace(/-{2,}/g, '-')
+        .replace(/^[-.]+/, '')
+        .replace(/[-.]+$/, '')
+        .slice(0, 64);
+      if (cleaned === '' || cleaned === '.' || cleaned === '..') return null;
+      if (cleaned.includes('..') || cleaned.endsWith('.lock')) return null;
+      return cleaned;
+    }
+
+    /** Lane topology for the graph dialog, matching the host's topo order. */
+    function computeLanes(rows) {
+      const later = new Set();
+      for (const row of rows) {
+        for (const parent of row.parents || []) later.add(parent);
+      }
+      const lanes = [];
+      const result = [];
+      for (const row of rows) {
+        let nodeColumn = lanes.findIndex((pending) => pending === row.sha);
+        if (nodeColumn === -1) {
+          lanes.push(row.sha);
+          nodeColumn = lanes.length - 1;
+        }
+        const columns = [];
+        for (let index = 0; index < lanes.length; index += 1) {
+          const pending = lanes[index];
+          if (pending === null) columns.push('gap');
+          else if (index === nodeColumn) columns.push((row.parents || []).length > 1 ? 'merge' : 'node');
+          else if (pending === row.sha) columns.push('gap');
+          else if (typeof pending === 'string' && later.has(pending)) columns.push('pass');
+          else columns.push('gap');
+        }
+        const parents = (row.parents || []).filter((parent) => later.has(parent));
+        const [first, ...rest] = parents;
+        for (let index = 0; index < lanes.length; index += 1) {
+          if (lanes[index] === row.sha && index !== nodeColumn) lanes[index] = null;
+        }
+        lanes[nodeColumn] = first === undefined ? null : first;
+        for (const parent of rest) {
+          if (!lanes.includes(parent)) lanes.push(parent);
+        }
+        while (lanes.length > 0 && lanes[lanes.length - 1] === null) lanes.pop();
+        result.push({ columns, nodeColumn, merge: (row.parents || []).length > 1 });
+      }
+      return result;
+    }
+
+    function laneChar(glyph) {
+      if (glyph === 'node') return '●';
+      if (glyph === 'merge') return '◆';
+      if (glyph === 'pass') return '│';
+      return ' ';
+    }
+
     /** Absolute filesystem path of a repository-relative entry. */
     function joinAbsolute(root, relativePath) {
       const base = String(root || '').replace(/[\\/]+$/, '');
@@ -571,6 +757,67 @@ window.__ModuleLoader__.load({
         throw error;
       }
       return json.value;
+    }
+
+    /**
+     * Shared worktree flow for both the Git panel and the composer branch pill:
+     * create the managed checkout, then register its workspace and open a blank
+     * session. A failure after the Git write removes the checkout again so no
+     * half-created workspace is left behind.
+     */
+    async function addWorktreeSession(workspace, repo, name, baseRef) {
+      if (!worktreeBridge) {
+        const unavailable = new Error(t('err_WORKTREE_SERVICE_UNAVAILABLE'));
+        unavailable.code = 'WORKTREE_SERVICE_UNAVAILABLE';
+        throw unavailable;
+      }
+      let created = null;
+      try {
+        created = await rpc('worktree-add', { workspace, repo, name, baseRef });
+        await worktreeBridge.start(created.path);
+        return created;
+      } catch (error) {
+        if (created) {
+          try {
+            await rpc('worktree-remove', {
+              workspace,
+              repo,
+              path: created.path,
+              force: true,
+              deleteBranch: true,
+            });
+          } catch {
+            // The original failure is what the caller reports.
+          }
+        }
+        throw error;
+      }
+    }
+
+    /** Remove a managed worktree and, when linked, its workspace registration. */
+    async function removeWorktreeSession(workspace, repo, path, options) {
+      const result = await rpc('worktree-remove', {
+        workspace,
+        repo,
+        path,
+        force: Boolean(options && options.force),
+        deleteBranch: Boolean(options && options.deleteBranch),
+      });
+      if (worktreeBridge) {
+        const items = worktreeBridge.list();
+        const linked = Array.isArray(items)
+          ? items.find((item) => samePath(item.path, path))
+          : null;
+        if (linked) {
+          try {
+            await worktreeBridge.delete(linked.workspaceId);
+          } catch {
+            // The disk removal succeeded; a stale workspace row is less harmful
+            // than hiding that success.
+          }
+        }
+      }
+      return result;
     }
 
     function Svg({ size = 16, children, className }) {
@@ -1064,7 +1311,7 @@ window.__ModuleLoader__.load({
      * Pill trigger + popover list. Replaces the native <select>, whose OS popup
      * cannot follow the host's pill language and looks out of place.
      */
-    function PillSelect({ ariaLabel, title, trigger, onOpenChange, children, disabled, alignEnd, menuClassName }) {
+    function PillSelect({ ariaLabel, title, trigger, onOpenChange, children, disabled, alignEnd, menuClassName, triggerClassName }) {
       const [open, setOpen] = useState(false);
       const rootRef = useRef(null);
       const change = useCallback((next) => {
@@ -1092,7 +1339,7 @@ window.__ModuleLoader__.load({
       return h('span', { className: 'dshg-pillselect', ref: rootRef },
         h('button', {
           type: 'button',
-          className: 'dshg-pillselect-trigger',
+          className: cx('dshg-pillselect-trigger', triggerClassName),
           disabled,
           onClick: () => change(!open),
           'aria-haspopup': 'listbox',
@@ -1107,8 +1354,11 @@ window.__ModuleLoader__.load({
         }, children(close)) : null);
     }
 
-    /** Branch switcher: local and remote tabs, searchable, with a fixed list area. */
-    function BranchSwitcher({ status, busy, load, onPick }) {
+    /** Branch switcher: searchable list with the four branch/worktree actions. */
+    function BranchSwitcher({
+      status, busy, load, onPick,
+      onCreate, onGraph, onCreateWorktree, onManageWorktrees, hero,
+    }) {
       const [query, setQuery] = useState('');
       const [tab, setTab] = useState('local');
       const [branches, setBranches] = useState({ local: [], remote: [] });
@@ -1120,12 +1370,17 @@ window.__ModuleLoader__.load({
         setFailed(null);
         try {
           const next = await load();
+          const remote = Array.isArray(next.remote) ? next.remote : [];
           setBranches({
             local: Array.isArray(next.local) ? next.local : [],
-            remote: Array.isArray(next.remote) ? next.remote : [],
+            remote,
           });
+          // The reference branch menu only shows local branches when the
+          // repository has no remote; a stale remote tab must not hide them.
+          if (remote.length === 0) setTab('local');
         } catch (error) {
           setBranches({ local: [], remote: [] });
+          setTab('local');
           setFailed(error && error.code ? error.code : 'UNKNOWN');
         } finally {
           setLoading(false);
@@ -1136,36 +1391,47 @@ window.__ModuleLoader__.load({
       const needle = query.trim().toLowerCase();
       const local = branches.local || [];
       const remote = branches.remote || [];
-      const visible = (tab === 'local' ? local : remote)
+      const activeTab = tab === 'remote' && remote.length > 0 ? 'remote' : 'local';
+      // Keep the local current branch's upstream at the top of the remote tab:
+      // switching back to it is the most common action after browsing a remote.
+      const source = activeTab === 'local'
+        ? local
+        : remote.slice().sort((left, right) => {
+            const leftUpstream = left.name === status.upstream ? 0 : 1;
+            const rightUpstream = right.name === status.upstream ? 0 : 1;
+            return leftUpstream - rightUpstream || left.name.localeCompare(right.name);
+          });
+      const visible = source
         .filter((item) => !needle || item.name.toLowerCase().includes(needle));
-      const emptyText = tab === 'local' ? t('branchesLocalEmpty') : t('branchesRemoteEmpty');
+      const emptyText = activeTab === 'local' ? t('branchesLocalEmpty') : t('branchesRemoteEmpty');
 
       const tabButton = (id, text, count) => h('button', {
         type: 'button',
-        className: cx('dshg-menu-tab', tab === id && 'active'),
+        className: cx('dshg-menu-tab', activeTab === id && 'active'),
         onClick: () => setTab(id),
-        'aria-pressed': tab === id ? 'true' : 'false',
+        'aria-pressed': activeTab === id ? 'true' : 'false',
       }, text, count > 0 ? h('span', { className: 'dshg-menu-tab-count' }, count) : null);
 
       return h(PillSelect, {
         ariaLabel: t('selectBranch'),
         title: status.repoRoot || '',
         disabled: Boolean(busy) || Boolean(status.isBare),
-        menuClassName: 'dshg-menu-branch',
+        menuClassName: cx('dshg-menu-branch', hero && 'dshg-menu-branch-hero'),
+        triggerClassName: hero ? 'dshg-pillselect-hero' : null,
         trigger: h(React.Fragment, null,
           h(IconBranch, { size: 13 }),
           h('strong', { className: 'dshg-pill-strong', 'data-dshg-tip': label }, label),
-          status.ahead > 0 ? h('span', { className: 'dshg-ahead' }, `↑${status.ahead}`) : null,
-          status.behind > 0 ? h('span', { className: 'dshg-behind' }, `↓${status.behind}`) : null),
+          !hero && status.ahead > 0 ? h('span', { className: 'dshg-ahead' }, `↑${status.ahead}`) : null,
+          !hero && status.behind > 0 ? h('span', { className: 'dshg-behind' }, `↓${status.behind}`) : null),
         onOpenChange: (open) => {
           if (!open) return;
           setQuery('');
           void refresh();
         },
       }, (close) => h(React.Fragment, null,
-        h('div', { className: 'dshg-menu-tabs', role: 'tablist' },
+        remote.length > 0 ? h('div', { className: 'dshg-menu-tabs', role: 'tablist' },
           tabButton('local', t('branchesLocal'), local.length),
-          tabButton('remote', t('branchesRemote'), remote.length)),
+          tabButton('remote', t('branchesRemote'), remote.length)) : null,
         h('input', {
           className: 'dshg-menu-search',
           value: query,
@@ -1184,24 +1450,426 @@ window.__ModuleLoader__.load({
           !loading && !failed && visible.length === 0 ? h('div', { className: 'dshg-menu-empty' }, emptyText) : null,
           !loading && !failed ? visible.map((item) => h(MenuItem, {
             key: item.name,
-            active: tab === 'local' ? item.current : false,
-            hint: tab === 'local'
-              ? (item.current ? t('branchCurrent') : null)
+            active: activeTab === 'local' ? item.current : false,
+            hint: activeTab === 'local'
+              ? null
               : (item.name === status.upstream ? t('branchUpstream') : null),
             onClick: () => {
               close();
-              if (tab === 'local' && item.current) return;
-              void onPick(tab === 'local'
+              if (activeTab === 'local' && item.current) return;
+              void onPick(activeTab === 'local'
                 ? { branch: item.name }
                 : { branch: item.branch, remoteBranch: item.name });
             },
-          }, item.name)) : null)));
+          }, item.name)) : null),
+        h('div', { className: 'dshg-menu-actions' },
+          h('button', {
+            type: 'button',
+            className: 'dshg-menu-action-row',
+            onClick: () => { close(); onCreate(); },
+          }, h(IconBranch, { size: 14 }), h('span', null, t('branchCreateAction'))),
+          h('button', {
+            type: 'button',
+            className: 'dshg-menu-action-row',
+            onClick: () => { close(); onGraph(); },
+          }, h(IconBranch, { size: 14 }), h('span', null, t('branchGraphAction'))),
+          h('button', {
+            type: 'button',
+            className: 'dshg-menu-action-row',
+            onClick: () => { close(); void onCreateWorktree(); },
+          }, h(IconBranch, { size: 14 }), h('span', null, t('worktreeCreateAction'))),
+          h('button', {
+            type: 'button',
+            className: 'dshg-menu-action-row',
+            onClick: () => { close(); onManageWorktrees(); },
+          }, h(IconBranch, { size: 14 }), h('span', null, t('worktreeManageAction'))))));
+    }
+
+    /**
+     * Shared modal shell: a transparent backdrop plus the centered card.
+     * Keeping it inline (not a portal) matches the panel's existing stacking
+     * model and leaves the host sidebar visible, like the reference dialogs.
+     */
+    function DialogShell({ title, subtitle, onClose, children, footer, className }) {
+      useEffect(() => {
+        const onKeyDown = (event) => {
+          if (event.key !== 'Escape') return;
+          event.stopPropagation();
+          onClose();
+        };
+        document.addEventListener('keydown', onKeyDown, true);
+        return () => document.removeEventListener('keydown', onKeyDown, true);
+      }, [onClose]);
+
+      return h(React.Fragment, null,
+        h('div', { className: 'dshg-modal-backdrop', onClick: onClose, 'aria-hidden': true }),
+        h('div', {
+          className: cx('dshg-dialog', className),
+          role: 'dialog',
+          'aria-modal': 'true',
+          'aria-label': title,
+        },
+        h('div', { className: 'dshg-dialog-head' },
+          h('div', { className: 'dshg-dialog-heading' },
+            h('div', { className: 'dshg-dialog-title' }, title),
+            subtitle ? h('div', { className: 'dshg-dialog-subtitle' }, subtitle) : null),
+          h('button', {
+            type: 'button',
+            className: 'dshg-dialog-close',
+            onClick: onClose,
+            'aria-label': t('close'),
+            title: t('close'),
+          }, h(IconClose, { size: 15 }))),
+        h('div', { className: 'dshg-dialog-body' }, children),
+        footer ? h('div', { className: 'dshg-dialog-footer' }, footer) : null));
+    }
+
+    function CreateBranchDialog({ onCreate, onClose }) {
+      const [name, setName] = useState('');
+      const [pending, setPending] = useState(false);
+      const [error, setError] = useState(null);
+
+      const submit = useCallback(async () => {
+        if (pending) return;
+        const trimmed = name.trim();
+        if (validateBranchName(trimmed) !== null) {
+          setError(t('invalidBranchName'));
+          return;
+        }
+        setPending(true);
+        setError(null);
+        try {
+          await onCreate(trimmed);
+          onClose();
+        } catch (failure) {
+          setError(errorText(failure));
+        } finally {
+          setPending(false);
+        }
+      }, [name, pending, onCreate, onClose]);
+
+      return h(DialogShell, {
+        title: t('branchCreateTitle'),
+        onClose,
+        footer: h(React.Fragment, null,
+          h('button', { type: 'button', className: 'dshg-dialog-button', onClick: onClose }, t('cancel')),
+          h('button', {
+            type: 'button',
+            className: 'dshg-dialog-button dshg-dialog-button-primary',
+            disabled: pending || name.trim() === '',
+            onClick: submit,
+          }, pending ? t('creatingBranch') : t('createAndCheckout'))),
+      },
+      h('p', { className: 'dshg-dialog-description' }, t('branchCreateDesc')),
+      h('label', { className: 'dshg-dialog-field' },
+        h('span', { className: 'dshg-dialog-label' }, t('branchNameLabel')),
+        h('input', {
+          className: 'dshg-dialog-input',
+          value: name,
+          placeholder: t('branchNamePlaceholder'),
+          onChange: (event) => { setName(event.target.value); setError(null); },
+          onKeyDown: (event) => { if (event.key === 'Enter') void submit(); },
+          autoFocus: true,
+          spellCheck: false,
+        })),
+      error ? h('div', { className: 'dshg-dialog-error' }, error) : null);
+    }
+
+    function GitGraphDialog({ fetchGraph, onClose }) {
+      const [view, setView] = useState(null);
+      const [loading, setLoading] = useState(true);
+      const [loadingMore, setLoadingMore] = useState(false);
+      const [error, setError] = useState(null);
+      const requestSeq = useRef(0);
+
+      useEffect(() => {
+        let alive = true;
+        const seq = ++requestSeq.current;
+        setLoading(true);
+        setError(null);
+        fetchGraph(200).then((next) => {
+          if (!alive || seq !== requestSeq.current) return;
+          setView(next || { commits: [], hasMore: false });
+          setLoading(false);
+        }).catch((failure) => {
+          if (!alive || seq !== requestSeq.current) return;
+          setError(errorText(failure));
+          setLoading(false);
+        });
+        return () => { alive = false; };
+      }, [fetchGraph]);
+
+      const loadMore = useCallback(async () => {
+        if (!view || loadingMore) return;
+        const seq = ++requestSeq.current;
+        setLoadingMore(true);
+        try {
+          const next = await fetchGraph(view.commits.length + 100);
+          if (seq !== requestSeq.current) return;
+          setView((current) => {
+            const seen = new Set((current?.commits || []).map((commit) => commit.sha));
+            return {
+              commits: [...(current?.commits || []), ...((next?.commits) || []).filter((commit) => !seen.has(commit.sha))],
+              hasMore: Boolean(next?.hasMore),
+            };
+          });
+        } catch (failure) {
+          if (seq === requestSeq.current) setError(errorText(failure));
+        } finally {
+          if (seq === requestSeq.current) setLoadingMore(false);
+        }
+      }, [view, loadingMore, fetchGraph]);
+
+      const commits = view?.commits || [];
+      const lanes = useMemo(() => computeLanes(commits), [commits]);
+      const laneCount = useMemo(() => lanes.reduce((max, row) => Math.max(max, row.columns.length), 0), [lanes]);
+
+      return h(DialogShell, {
+        title: t('gitGraphTitle'),
+        subtitle: tf('gitGraphSubtitle', { count: commits.length, lanes: laneCount }),
+        onClose,
+        className: 'dshg-dialog-graph',
+      },
+      loading && commits.length === 0
+        ? h('div', { className: 'dshg-dialog-empty' }, t('gitGraphLoading'))
+        : error
+          ? h('div', { className: 'dshg-dialog-empty dshg-dialog-empty-error' }, error)
+          : commits.length === 0
+            ? h('div', { className: 'dshg-dialog-empty' }, t('graphEmpty'))
+            : h('div', { className: 'dshg-graph-body' },
+              commits.map((commit, index) => {
+                const lane = lanes[index] || { columns: [] };
+                return h('div', { className: 'dshg-graph-row', key: commit.sha },
+                  h('span', { className: 'dshg-graph-lanes', 'aria-hidden': true },
+                    lane.columns.map((glyph, column) => h('span', {
+                      key: column,
+                      className: cx('dshg-graph-lane', `dshg-graph-lane-${glyph}`),
+                    }, laneChar(glyph)))),
+                  h('span', { className: 'dshg-graph-sha', title: commit.sha }, String(commit.sha).slice(0, 7)),
+                  h('span', { className: 'dshg-graph-main' },
+                    h('span', { className: 'dshg-graph-subject', title: commit.subject }, commit.subject),
+                    h('span', { className: 'dshg-graph-meta' },
+                      (commit.refs || []).slice(0, 3).map((ref, refIndex) => {
+                        const info = refInfo(ref);
+                        return info && info.name
+                          ? h('span', {
+                              key: `${commit.sha}-ref-${refIndex}`,
+                              className: cx('dshg-graph-ref', info.kind),
+                              title: info.name,
+                            }, info.name)
+                          : null;
+                      }),
+                      h('span', null, commit.author || ''),
+                      h('span', { className: 'dshg-graph-sep' }, '·'),
+                      h('span', null, formatRelative(commit.timestamp)))));
+              }),
+              view?.hasMore ? h('button', {
+                type: 'button',
+                className: 'dshg-graph-more',
+                disabled: loadingMore,
+                onClick: loadMore,
+              }, loadingMore ? t('loading') : t('gitGraphLoadMore')) : null));
+    }
+
+    /** Searchable local-branch menu used by the worktree base picker. */
+    function BranchFieldMenu({ branches, value, onPick }) {
+      const [query, setQuery] = useState('');
+      const needle = query.trim().toLowerCase();
+      const visible = branches.filter((branch) => !needle || branch.toLowerCase().includes(needle));
+      return h(React.Fragment, null,
+        h('input', {
+          className: 'dshg-menu-search',
+          value: query,
+          placeholder: t('filterBranches'),
+          onChange: (event) => setQuery(event.target.value),
+          autoFocus: true,
+          spellCheck: false,
+          'aria-label': t('filterBranches'),
+        }),
+        h('div', { className: 'dshg-menu-list dshg-menu-field-list', role: 'group' },
+          visible.length === 0
+            ? h('div', { className: 'dshg-menu-empty' }, t('branchesLocalEmpty'))
+            : visible.map((branch) => h(MenuItem, {
+                key: branch,
+                active: branch === value,
+                onClick: () => onPick(branch),
+              }, branch))));
+    }
+
+    function CreateWorktreeDialog({ branches, currentBranch, onCreate, onClose }) {
+      const [name, setName] = useState('');
+      const [baseRef, setBaseRef] = useState(currentBranch || (branches[0] || ''));
+      const [pending, setPending] = useState(false);
+      const [error, setError] = useState(null);
+
+      const submit = useCallback(async () => {
+        if (pending) return;
+        const sanitized = sanitizeWorktreeName(name);
+        if (!sanitized) {
+          setError(t('err_WORKTREE_NAME_INVALID'));
+          return;
+        }
+        setPending(true);
+        setError(null);
+        try {
+          await onCreate(sanitized, baseRef || undefined);
+          onClose();
+        } catch (failure) {
+          setError(errorText(failure));
+        } finally {
+          setPending(false);
+        }
+      }, [pending, name, baseRef, onCreate, onClose]);
+
+      const options = branches.includes(currentBranch) || !currentBranch
+        ? branches
+        : [currentBranch, ...branches];
+
+      return h(DialogShell, {
+        title: t('worktreeCreateTitle'),
+        onClose,
+        className: 'dshg-dialog-worktree',
+        footer: h(React.Fragment, null,
+          h('button', { type: 'button', className: 'dshg-dialog-button', onClick: onClose }, t('cancel')),
+          h('button', {
+            type: 'button',
+            className: 'dshg-dialog-button dshg-dialog-button-primary',
+            disabled: pending || name.trim() === '' || !baseRef,
+            onClick: submit,
+          }, pending ? t('worktreeStarting') : t('worktreeStart'))),
+      },
+      h('p', { className: 'dshg-dialog-description' }, t('worktreeCreateDesc')),
+      h('label', { className: 'dshg-dialog-field' },
+        h('span', { className: 'dshg-dialog-label' }, t('worktreeNameLabel')),
+        h('input', {
+          className: 'dshg-dialog-input',
+          value: name,
+          placeholder: t('worktreeNamePlaceholder'),
+          onChange: (event) => { setName(event.target.value); setError(null); },
+          onKeyDown: (event) => { if (event.key === 'Enter') void submit(); },
+          autoFocus: true,
+          spellCheck: false,
+        })),
+      h('div', { className: 'dshg-dialog-field' },
+        h('span', { className: 'dshg-dialog-label' }, t('worktreeBaseLabel')),
+        h('div', { className: 'dshg-branch-field' },
+          h(PillSelect, {
+            ariaLabel: t('worktreeBaseLabel'),
+            title: baseRef,
+            disabled: pending,
+            triggerClassName: 'dshg-pillselect-field',
+            menuClassName: 'dshg-menu-field',
+            trigger: h(React.Fragment, null,
+              h(IconBranch, { size: 13 }),
+              h('span', { className: 'dshg-field-value' }, baseRef || '—')),
+          }, (close) => h(BranchFieldMenu, {
+            branches: options,
+            value: baseRef,
+            onPick: (branch) => { close(); setBaseRef(branch); },
+          })))),
+      error ? h('div', { className: 'dshg-dialog-error' }, error) : null);
+    }
+
+    function WorktreeManagerDialog({ fetchWorktrees, onRemove, onClose }) {
+      const [view, setView] = useState(null);
+      const [loading, setLoading] = useState(true);
+      const [error, setError] = useState(null);
+      const [pending, setPending] = useState(null);
+      const [forcePath, setForcePath] = useState(null);
+      const [deleteBranches, setDeleteBranches] = useState({});
+
+      const load = useCallback(async () => {
+        setLoading(true);
+        setError(null);
+        try {
+          const next = await fetchWorktrees();
+          setView(next || { worktrees: [] });
+        } catch (failure) {
+          setError(errorText(failure));
+          setView({ worktrees: [] });
+        } finally {
+          setLoading(false);
+        }
+      }, [fetchWorktrees]);
+
+      useEffect(() => { void load(); }, [load]);
+
+      const remove = useCallback(async (item, force) => {
+        if (pending) return;
+        setPending(item.path);
+        setError(null);
+        try {
+          await onRemove(item.path, { force, deleteBranch: Boolean(deleteBranches[item.path]) });
+          setForcePath(null);
+          await load();
+        } catch (failure) {
+          if (failure && failure.code === 'WORKTREE_DIRTY' && !force) {
+            setForcePath(item.path);
+          } else {
+            setError(errorText(failure));
+          }
+        } finally {
+          setPending(null);
+        }
+      }, [pending, onRemove, deleteBranches, load]);
+
+      const rows = view?.worktrees || [];
+      const managed = rows.filter((item) => !item.main);
+
+      return h(DialogShell, {
+        title: t('worktreeManagerTitle'),
+        onClose,
+        footer: h('button', { type: 'button', className: 'dshg-dialog-button', onClick: onClose }, t('close')),
+      },
+      h('div', { className: 'dshg-worktree-list' },
+        loading ? h('div', { className: 'dshg-dialog-empty' }, t('loading')) : null,
+        !loading && managed.length === 0 ? h('div', { className: 'dshg-worktree-empty' }, t('worktreeEmpty')) : null,
+        !loading ? rows.map((item) => h('div', {
+          key: item.path,
+          className: cx('dshg-worktree-row', item.main && 'dshg-worktree-row-main'),
+        },
+        h('div', { className: 'dshg-worktree-info' },
+          h('div', { className: 'dshg-worktree-headline' },
+            h(IconBranch, { size: 13 }),
+            h('span', { className: 'dshg-worktree-branch' },
+              item.branch || t('worktreeDetached')),
+            item.main ? h('span', { className: 'dshg-worktree-badge' }, t('worktreeMain')) : null,
+            !item.main && !item.managed ? h('span', { className: 'dshg-worktree-badge' }, t('worktreeUnmanaged')) : null,
+            h('span', { className: 'dshg-worktree-oid' }, String(item.head || '').slice(0, 7))),
+          h('div', { className: 'dshg-worktree-path', title: item.path }, item.path),
+          forcePath === item.path ? h('div', { className: 'dshg-worktree-confirm' },
+            h('span', null, t('worktreeForceConfirm')),
+            h('button', {
+              type: 'button',
+              className: 'dshg-dialog-button',
+              disabled: Boolean(pending),
+              onClick: () => remove(item, true),
+            }, t('worktreeForceYes'))) : null),
+        item.main ? null : h('div', { className: 'dshg-worktree-actions' },
+          item.managed && item.branch.startsWith('wt/') ? h('label', { className: 'dshg-worktree-check' },
+            h('input', {
+              type: 'checkbox',
+              checked: Boolean(deleteBranches[item.path]),
+              onChange: () => setDeleteBranches((current) => ({
+                ...current,
+                [item.path]: !current[item.path],
+              })),
+            }),
+            t('worktreeDeleteBranch')) : null,
+          h('button', {
+            type: 'button',
+            className: 'dshg-dialog-button',
+            disabled: Boolean(pending) || !item.managed,
+            onClick: () => remove(item, false),
+          }, t('worktreeRemove'))))) : null),
+      error ? h('div', { className: 'dshg-dialog-error' }, error) : null);
     }
 
     function PanelHeader({
       workspaces, workspace, repos, repo, showAllRepos, status, busy,
       onWorkspace, onRepo, onToggleRepos, onRefresh, onFetch, onPull, onPush,
       loadBranches, onPickBranch,
+      onCreateBranch, onOpenGraph, onOpenWorktree, onManageWorktrees,
     }) {
       const selectedRepo = repos.find((item) => samePath(item.root, repo));
       const currentWorkspace = workspaces.find((item) => item.path === workspace);
@@ -1254,6 +1922,10 @@ window.__ModuleLoader__.load({
           busy,
           load: loadBranches,
           onPick: onPickBranch,
+          onCreate: onCreateBranch,
+          onGraph: onOpenGraph,
+          onCreateWorktree: onOpenWorktree,
+          onManageWorktrees: onManageWorktrees,
         }) : null,
         status && status.isBare ? h('span', { className: 'dshg-chip' }, h('strong', null, t('bareRepo'))) : null,
         status && status.isRepo && Array.isArray(status.remotes) && status.remotes.length === 0
@@ -1861,6 +2533,8 @@ window.__ModuleLoader__.load({
       const [leftWidth, setLeftWidth] = useState(() => readPaneWidth('dsh-git.pane.left', 300, 220, 620));
       const [rightWidth, setRightWidth] = useState(() => readPaneWidth('dsh-git.pane.right', 400, 280, 820));
       const [resizing, setResizing] = useState(false);
+      const [dialog, setDialog] = useState(null);
+      const [worktreeBranches, setWorktreeBranches] = useState([]);
 
       const applyStatus = useCallback((next) => {
         setStatus(next);
@@ -2019,6 +2693,70 @@ window.__ModuleLoader__.load({
         });
       }, [workspace, repo, act, refreshStatus]);
 
+      const createBranchFromHead = useCallback(async (name) => {
+        busyRef.current = true;
+        setBusy(t('creatingBranch'));
+        setToast(null);
+        try {
+          const result = await rpc('create-branch', { workspace, repo, name });
+          await refreshStatus(workspace, repo, false);
+          setGraphVersion((value) => value + 1);
+          setToast({ kind: 'success', text: tf('branchCreated', { branch: (result && result.branch) || name }) });
+          return result;
+        } finally {
+          busyRef.current = false;
+          setBusy('');
+        }
+      }, [workspace, repo, refreshStatus]);
+
+      const fetchGraphDialog = useCallback(async (limit) => {
+        return rpc('graph', { workspace, repo, limit });
+      }, [workspace, repo]);
+
+      const openWorktreeCreate = useCallback(async () => {
+        try {
+          const next = await loadBranches();
+          const names = (next && Array.isArray(next.local) ? next.local : []).map((item) => item.name);
+          if (status && status.branch && !names.includes(status.branch)) names.unshift(status.branch);
+          if (names.length === 0) {
+            setToast({ kind: 'error', text: t('worktreeNoBase') });
+            return;
+          }
+          setWorktreeBranches(names);
+          setDialog({ kind: 'worktree-create' });
+        } catch (error) {
+          setToast({ kind: 'error', text: errorText(error), detail: error.detail || null });
+        }
+      }, [loadBranches, status]);
+
+      const openWorktreeManager = useCallback(() => {
+        setDialog({ kind: 'worktree-manage' });
+      }, []);
+
+      const createWorktreeSession = useCallback(async (name, baseRef) => {
+        busyRef.current = true;
+        setBusy(t('worktreeStarting'));
+        setToast(null);
+        try {
+          const created = await addWorktreeSession(workspace, repo, name, baseRef);
+          setToast({ kind: 'success', text: tf('worktreeCreated', { name: created.name }) });
+          setGraphVersion((value) => value + 1);
+          return created;
+        } finally {
+          busyRef.current = false;
+          setBusy('');
+        }
+      }, [workspace, repo]);
+
+      const fetchWorktrees = useCallback(() => rpc('worktrees', { workspace, repo }), [workspace, repo]);
+
+      const removeWorktree = useCallback(async (path, options) => {
+        const result = await removeWorktreeSession(workspace, repo, path, options);
+        setToast({ kind: 'success', text: t('worktreeRemoved') });
+        setGraphVersion((value) => value + 1);
+        return result;
+      }, [workspace, repo]);
+
       useEffect(() => {
         let alive = true;
         rpc('workspaces').then((list) => {
@@ -2065,6 +2803,7 @@ window.__ModuleLoader__.load({
         setExpanded({});
         setAmend(false);
         setSignoff(false);
+        setDialog(null);
         setGraphVersion((value) => value + 1);
       }, [workspace]);
 
@@ -2088,6 +2827,7 @@ window.__ModuleLoader__.load({
         setGraphHasMore(false);
         setAmend(false);
         setSignoff(false);
+        setDialog(null);
         setGraphVersion((value) => value + 1);
         refreshStatus(workspace, repo, true);
         const timer = setInterval(() => {
@@ -2482,8 +3222,31 @@ window.__ModuleLoader__.load({
         onPush: pushRemote,
         loadBranches,
         onPickBranch: pickBranch,
+        onCreateBranch: () => setDialog({ kind: 'create-branch' }),
+        onOpenGraph: () => setDialog({ kind: 'graph' }),
+        onOpenWorktree: openWorktreeCreate,
+        onManageWorktrees: openWorktreeManager,
       }),
       h(Toast, { toast, onClose: () => setToast(null) }),
+      dialog && dialog.kind === 'create-branch' ? h(CreateBranchDialog, {
+        onCreate: createBranchFromHead,
+        onClose: () => setDialog(null),
+      }) : null,
+      dialog && dialog.kind === 'graph' ? h(GitGraphDialog, {
+        fetchGraph: fetchGraphDialog,
+        onClose: () => setDialog(null),
+      }) : null,
+      dialog && dialog.kind === 'worktree-create' ? h(CreateWorktreeDialog, {
+        branches: worktreeBranches,
+        currentBranch: status && status.branch ? status.branch : '',
+        onCreate: createWorktreeSession,
+        onClose: () => setDialog(null),
+      }) : null,
+      dialog && dialog.kind === 'worktree-manage' ? h(WorktreeManagerDialog, {
+        fetchWorktrees,
+        onRemove: removeWorktree,
+        onClose: () => setDialog(null),
+      }) : null,
       busy ? h('div', { className: 'dshg-progress', 'aria-hidden': true }) : null,
       !workspace && !loading ? h(EmptyState, {
         icon: h(GitGlyph, { size: 30 }),
@@ -2669,6 +3432,11 @@ window.__ModuleLoader__.load({
       .dshg-root select:focus-visible,
       .dshg-root textarea:focus-visible { outline: 2px solid var(--dsw-alias-state-business-primary, #4a8cff); outline-offset: 2px; }
       .dshg-root *, .dshg-root *::before, .dshg-root *::after { box-sizing: border-box; }
+      /* The composer pill and its menu/dialogs live outside .dshg-root (they
+         are portalled into the shell hero row), so they need the same
+         border-box contract explicitly. */
+      .dshg-pillselect, .dshg-menu, .dshg-dialog { box-sizing: border-box; }
+      .dshg-pillselect *, .dshg-menu *, .dshg-dialog * { box-sizing: border-box; }
 
       /* Header ---------------------------------------------------------- */
       .dshg-header {
@@ -2761,10 +3529,33 @@ window.__ModuleLoader__.load({
       }
       .dshg-menu-action:hover { background: var(--dsw-alias-interactive-bg-hover, rgba(127,127,127,.10)); }
 
-      /* Branch menu: fixed header (tabs + search) and a scrollable list. */
+      /* Branch menu footer: the four reference actions, one per row. */
+      .dshg-menu-actions {
+        display: flex; flex-direction: column; gap: 1px;
+        flex: 0 0 auto;
+        margin-top: 4px; padding: 6px 2px 0;
+        border-top: 1px solid var(--dsw-alias-border-l1, #e5e7eb);
+      }
+      .dshg-menu-action-row {
+        display: flex; align-items: center; gap: 9px;
+        width: 100%; min-height: 30px; padding: 0 8px;
+        border: 0; border-radius: 8px; background: transparent; color: inherit;
+        font: inherit; font-size: 12px; text-align: left; cursor: pointer;
+        transition: background-color .1s ease;
+      }
+      .dshg-menu-action-row:hover, .dshg-menu-action-row:focus-visible {
+        background: var(--dsw-alias-interactive-bg-hover, rgba(127,127,127,.10));
+        outline: none;
+      }
+      .dshg-menu-action-row svg { flex: 0 0 auto; color: var(--dsw-alias-label-secondary, #6b7280); }
+      .dshg-menu-action-row span { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+
+      /* Branch menu: search + scrollable list + fixed action footer. */
       .dshg-menu-branch {
         width: 320px; max-width: min(360px, 88vw);
-        overflow: hidden; display: flex; flex-direction: column;
+        max-height: none; overflow: hidden;
+        display: flex; flex-direction: column;
+        padding: 6px 6px 4px;
       }
       .dshg-menu-tabs { display: flex; gap: 4px; padding: 0 0 6px; flex: 0 0 auto; }
       .dshg-menu-tab {
@@ -2776,6 +3567,9 @@ window.__ModuleLoader__.load({
       .dshg-menu-tab.active { background: var(--dsw-alias-bg-layer-2, #eef2f7); color: var(--dsw-alias-label-primary, #111); font-weight: 600; }
       .dshg-menu-tab-count { margin-left: 5px; color: var(--dsw-alias-label-tertiary, #6b7280); font-size: 10px; }
       .dshg-menu-branch .dshg-menu-search { flex: 0 0 auto; }
+      .dshg-menu-branch .dshg-menu-list {
+        max-height: 196px;
+      }
       .dshg-menu-list {
         flex: 1 1 auto; min-height: 0; max-height: 248px; overflow: auto;
         padding-right: 2px;
@@ -3123,6 +3917,182 @@ window.__ModuleLoader__.load({
       .dshg-commit-button { height: 28px; min-width: 96px; border-radius: 999px; background: var(--dsw-alias-state-business-primary, #2563eb); border-color: transparent; color: #fff; font-weight: 600; }
       .dshg-commit-button:hover:not(:disabled) { background: var(--dsw-alias-state-business-primary, #2563eb); filter: brightness(1.07); }
       .dshg-warning { padding: 6px 10px; border-radius: 999px; background: rgba(239,68,68,.10); color: var(--dshg-git-deleted); font-size: 11px; }
+
+      /* Dialogs -------------------------------------------------------- */
+      .dshg-modal-backdrop { position: fixed; inset: 0; z-index: 60; background: transparent; }
+      .dshg-dialog {
+        position: fixed; top: 50%; left: 50%; transform: translate(-50%, -50%);
+        z-index: 61; display: flex; flex-direction: column;
+        width: min(760px, calc(100vw - 48px)); max-height: min(78vh, 760px);
+        padding: 16px 16px 12px; border-radius: 12px;
+        border: 1px solid var(--dsw-alias-border-l2, #d1d5db);
+        background: var(--dsw-alias-bg-overlay, #f7f8fa);
+        color: var(--dsw-alias-label-primary, #111);
+        box-shadow: 0 18px 48px rgba(0, 0, 0, .24);
+      }
+      .dshg-dialog-graph { height: min(720px, 82vh); max-height: 82vh; }
+      .dshg-dialog-head {
+        display: flex; align-items: flex-start; justify-content: space-between;
+        gap: 12px; flex: 0 0 auto;
+      }
+      .dshg-dialog-heading { min-width: 0; }
+      .dshg-dialog-title { font-size: 15px; font-weight: 650; line-height: 1.35; }
+      .dshg-dialog-subtitle { margin-top: 2px; color: var(--dsw-alias-label-tertiary, #6b7280); font-size: 11px; }
+      .dshg-dialog-close {
+        display: inline-flex; align-items: center; justify-content: center;
+        width: 26px; height: 26px; margin: -2px; border: 0; border-radius: 8px;
+        background: transparent; color: var(--dsw-alias-label-tertiary, #6b7280);
+        cursor: pointer;
+      }
+      .dshg-dialog-close:hover { background: var(--dsw-alias-interactive-bg-hover, rgba(127,127,127,.10)); color: var(--dsw-alias-label-primary, #111); }
+      .dshg-dialog-close:focus-visible { outline: 2px solid var(--dsw-alias-state-business-primary, #4a8cff); outline-offset: 1px; }
+      .dshg-dialog-body { flex: 1 1 auto; min-height: 0; overflow-y: auto; padding: 2px 2px 0; }
+      .dshg-dialog-description {
+        margin: 8px 0 14px; color: var(--dsw-alias-label-secondary, #6b7280);
+        font-size: 12px; line-height: 1.5;
+      }
+      .dshg-dialog-field { display: flex; flex-direction: column; gap: 6px; margin-bottom: 12px; }
+      .dshg-dialog-label { color: var(--dsw-alias-label-secondary, #6b7280); font-size: 11.5px; }
+      .dshg-dialog-input {
+        width: 100%; box-sizing: border-box; padding: 8px 10px;
+        border: 1px solid var(--dsw-alias-border-l2, #d1d5db); border-radius: 8px;
+        background: var(--dsw-alias-bg-base, #fff); color: var(--dsw-alias-label-primary, #111);
+        font: inherit; font-size: 13px; outline: none;
+      }
+      .dshg-dialog-input:focus { border-color: var(--dsw-alias-state-business-primary, #4a8cff); box-shadow: 0 0 0 2px color-mix(in srgb, var(--dsw-alias-state-business-primary, #4a8cff) 24%, transparent); }
+      .dshg-branch-field { display: flex; width: 100%; }
+      .dshg-branch-field .dshg-pillselect { display: flex; flex: 1 1 auto; width: 100%; }
+      .dshg-pillselect-field {
+        width: 100%; max-width: none; height: 30px; padding: 0 30px 0 12px;
+        border: 1px solid transparent; border-radius: 999px;
+        background: var(--dsw-alias-bg-layer-1, #f4f5f7);
+        color: var(--dsw-alias-label-primary, #111);
+        gap: 6px; font-size: 13px; text-align: left;
+      }
+      .dshg-pillselect-field:hover:not(:disabled) { background: var(--dsw-alias-interactive-bg-hover, rgba(127,127,127,.10)); }
+      .dshg-pillselect-field[aria-expanded="true"] { background: var(--dsw-alias-bg-layer-2, #eef2f7); }
+      .dshg-field-value {
+        flex: 1 1 auto; min-width: 0; overflow: hidden;
+        text-overflow: ellipsis; white-space: nowrap; text-align: left;
+      }
+      /* Full-width popover for the dialog field. The dialog body opts out of
+         its own scroll clip so the menu can overhang the card like the panel's
+         branch menu does. */
+      .dshg-menu-field {
+        left: 0; right: 0; width: auto; min-width: 100%; max-width: none;
+        max-height: 240px;
+      }
+      .dshg-menu-field-list { max-height: 176px; }
+      .dshg-dialog-worktree { overflow: visible; }
+      .dshg-dialog-worktree .dshg-dialog-body { overflow: visible; }
+      .dshg-dialog-error { margin-top: 8px; color: var(--dshg-git-deleted); font-size: 12px; line-height: 1.45; }
+      .dshg-dialog-footer { display: flex; justify-content: flex-end; gap: 8px; flex: 0 0 auto; margin-top: 14px; }
+      .dshg-dialog-button {
+        height: 30px; padding: 0 14px; border-radius: 8px;
+        border: 1px solid var(--dsw-alias-border-l2, #d1d5db);
+        background: var(--dsw-alias-bg-layer-1, #f4f5f7);
+        color: var(--dsw-alias-label-primary, #111);
+        font: inherit; font-size: 12.5px; cursor: pointer;
+      }
+      .dshg-dialog-button:hover:not(:disabled) { background: var(--dsw-alias-interactive-bg-hover, rgba(127,127,127,.10)); }
+      .dshg-dialog-button:disabled { opacity: .55; cursor: default; }
+      .dshg-dialog-button-primary {
+        border-color: var(--dsw-alias-state-business-primary, #4a8cff);
+        background: var(--dsw-alias-state-business-primary, #4a8cff);
+        color: #fff;
+      }
+      .dshg-dialog-button-primary:hover:not(:disabled) { filter: brightness(.94); }
+      .dshg-dialog-empty {
+        padding: 28px 12px; text-align: center;
+        color: var(--dsw-alias-label-tertiary, #6b7280); font-size: 12px;
+      }
+      .dshg-dialog-empty-error { color: var(--dshg-git-deleted); }
+
+      /* Git graph dialog */
+      .dshg-graph-body { display: flex; flex-direction: column; padding: 4px 2px 8px; }
+      .dshg-graph-row {
+        display: flex; align-items: flex-start; gap: 10px;
+        padding: 7px 8px; border-radius: 8px; font-size: 12px;
+      }
+      .dshg-graph-row:hover { background: var(--dsw-alias-interactive-bg-hover, rgba(127,127,127,.08)); }
+      .dshg-graph-lanes {
+        display: flex; flex: 0 0 auto; padding-top: 1px;
+        font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+        font-size: 12px; line-height: 1.45;
+        color: var(--dsw-alias-label-tertiary, #6b7280);
+      }
+      .dshg-graph-lane { display: inline-block; width: 15px; text-align: center; flex: 0 0 auto; }
+      .dshg-graph-lane-node, .dshg-graph-lane-merge { color: var(--dsw-alias-state-business-primary, #4a8cff); font-weight: 700; }
+      .dshg-graph-lane-pass { color: var(--dsw-alias-label-tertiary, #6b7280); }
+      .dshg-graph-sha {
+        flex: 0 0 auto; min-width: 58px; margin-top: 1px;
+        padding: 1px 6px; border-radius: 4px;
+        background: var(--dsw-alias-bg-layer-2, #eef2f7);
+        color: var(--dsw-alias-label-tertiary, #6b7280);
+        font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+        font-size: 10px; line-height: 1.5;
+      }
+      .dshg-graph-main { display: flex; flex-direction: column; gap: 3px; flex: 1 1 auto; min-width: 0; }
+      .dshg-graph-subject {
+        overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+        color: var(--dsw-alias-label-primary, #111); font-size: 12.5px; font-weight: 500;
+      }
+      .dshg-graph-meta {
+        display: flex; align-items: center; flex-wrap: wrap; gap: 4px 6px;
+        color: var(--dsw-alias-label-tertiary, #6b7280); font-size: 10.5px;
+      }
+      .dshg-graph-sep { opacity: .7; }
+      .dshg-graph-ref {
+        max-width: 120px; overflow: hidden; text-overflow: ellipsis;
+        padding: 0 5px; border-radius: 999px;
+        background: var(--dsw-alias-bg-layer-2, #eef2f7);
+        color: var(--dsw-alias-label-secondary, #6b7280); font-size: 10px;
+      }
+      .dshg-graph-ref.head { background: var(--dsw-alias-state-business-primary, #4a8cff); color: #fff; }
+      .dshg-graph-more {
+        margin: 6px 8px 0; height: 28px; border-radius: 8px;
+        border: 1px solid var(--dsw-alias-border-l1, #e5e7eb);
+        background: transparent; color: var(--dsw-alias-label-secondary, #6b7280);
+        font: inherit; font-size: 11.5px; cursor: pointer;
+      }
+      .dshg-graph-more:hover:not(:disabled) { background: var(--dsw-alias-interactive-bg-hover, rgba(127,127,127,.10)); }
+
+      /* Worktree manager */
+      .dshg-worktree-list {
+        flex: 1 1 auto; min-height: 170px; overflow-y: auto;
+        margin-top: 10px; padding: 4px; border-radius: 10px;
+        border: 1px solid var(--dsw-alias-border-l1, #e5e7eb);
+        background: var(--dsw-alias-bg-base, #fff);
+      }
+      .dshg-worktree-empty {
+        padding: 18px 10px; text-align: center;
+        color: var(--dsw-alias-label-tertiary, #6b7280); font-size: 12px;
+      }
+      .dshg-worktree-row {
+        display: flex; align-items: flex-start; justify-content: space-between; gap: 10px;
+        padding: 8px; border-radius: 8px; font-size: 12px;
+      }
+      .dshg-worktree-row:hover { background: var(--dsw-alias-interactive-bg-hover, rgba(127,127,127,.06)); }
+      .dshg-worktree-info { display: flex; flex-direction: column; gap: 3px; flex: 1 1 auto; min-width: 0; }
+      .dshg-worktree-headline { display: flex; align-items: center; gap: 6px; color: var(--dsw-alias-label-primary, #111); }
+      .dshg-worktree-branch { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-weight: 500; }
+      .dshg-worktree-badge {
+        flex: 0 0 auto; padding: 1px 6px; border-radius: 999px;
+        background: var(--dsw-alias-bg-layer-2, #eef2f7);
+        color: var(--dsw-alias-label-secondary, #6b7280); font-size: 10px;
+      }
+      .dshg-worktree-oid {
+        flex: 0 0 auto; font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+        font-size: 10.5px; color: var(--dsw-alias-label-tertiary, #6b7280);
+      }
+      .dshg-worktree-path {
+        overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+        font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+        font-size: 10.5px; color: var(--dsw-alias-label-tertiary, #6b7280);
+      }
+      .dshg-worktree-actions { display: flex; flex-direction: column; align-items: flex-end; gap: 6px; flex: 0 0 auto; }
+      .dshg-worktree-check { display: flex; align-items: center; gap: 4px; color: var(--dsw-alias-label-secondary, #6b7280); font-size: 10.5px; cursor: pointer; }
+      .dshg-worktree-confirm { display: flex; align-items: center; gap: 8px; margin-top: 2px; color: var(--dshg-git-deleted); font-size: 11px; }
 
       /* Toast ----------------------------------------------------------- */
       .dshg-toast {
@@ -3655,6 +4625,46 @@ window.__ModuleLoader__.load({
       ctx.effect(() => installTooltip(), 'dsh-git: tooltip layer');
 
       ctx.effect(() => installWorkspaceTreeDecorations(), 'dsh-git: workspace tree status');
+
+      // The branch menu can create an isolated checkout and open its blank
+      // session. Those verbs live on the Client workspaces / uiWorkspace
+      // services (Host owns the registry and session log); keeping them in a
+      // bridge means the rest of the panel still mounts in shells that omit
+      // them, and the worktree dialog can explain that instead of dying.
+      ctx.inject(['workspaces', 'uiWorkspace'], (scope) => {
+        const bridge = {
+          list() {
+            try {
+              return scope.workspaces.list.getSnapshot().items;
+            } catch {
+              return [];
+            }
+          },
+          async start(path) {
+            const workspace = await scope.workspaces.create({ path });
+            try {
+              await scope.uiWorkspace.openWorkspace(workspace.workspaceId);
+            } catch (error) {
+              try {
+                await scope.workspaces.delete(workspace.workspaceId);
+              } catch {
+                // Leave the registration for the user to clean up rather than
+                // masking the original session-open failure.
+              }
+              throw error;
+            }
+            return workspace;
+          },
+          async delete(workspaceId) {
+            await scope.workspaces.delete(workspaceId);
+          },
+        };
+        worktreeBridge = bridge;
+        return () => {
+          if (worktreeBridge === bridge) worktreeBridge = null;
+        };
+      });
+
       ctx.effect(() => {
         const onKeyDown = (event) => {
           if (!(event.ctrlKey || event.metaKey) || !event.shiftKey) return;
