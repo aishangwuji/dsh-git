@@ -2,7 +2,8 @@ window.__ModuleLoader__.load({
   id: '@local/dsh-git-panel',
   factory(require) {
     const React = require('react');
-    const { useState, useEffect, useMemo, useRef, useCallback } = React;
+    const { createPortal } = require('react-dom');
+    const { useState, useEffect, useMemo, useRef, useCallback, useLayoutEffect } = React;
     const h = React.createElement;
 
     const NS = 'dsh.git';
@@ -26,6 +27,8 @@ window.__ModuleLoader__.load({
      * report a readable error instead of crashing the panel.
      */
     let worktreeBridge = null;
+    /** Session summary lookup used by the composer chip when its slot props omit hooks. */
+    let sessionBridge = null;
 
     const zh = {
       panel: 'Git 工作台',
@@ -1865,6 +1868,255 @@ window.__ModuleLoader__.load({
       error ? h('div', { className: 'dshg-dialog-error' }, error) : null);
     }
 
+    /**
+     * Portal host for the blank-session hero row. The dock slot is rendered as
+     * its own row below `heroWorkspaceRow`; the reference UI places the branch
+     * pill inline after the agent-preset chip, before the hero options group.
+     * A mutation observer keeps the portal host in that row across shell
+     * re-renders without participating in the row's React children.
+     */
+    function HeroRowPortal({ active, children, anchorRef }) {
+      const [host] = useState(() => document.createElement('div'));
+      useLayoutEffect(() => {
+        if (!active) return undefined;
+        host.dataset.dshgComposerChip = '1';
+        host.style.display = 'contents';
+        const place = () => {
+          const anchor = anchorRef && anchorRef.current;
+          const outlet = anchor && anchor.parentElement;
+          let row = null;
+          if (outlet) {
+            const previous = outlet.previousElementSibling;
+            if (previous && String(previous.className || '').includes('heroWorkspaceRow')) {
+              row = previous;
+            }
+            if (!row) {
+              const stack = outlet.closest('[class*="composerStack"], [class*="composerHero"]');
+              row = stack ? stack.querySelector('[class*="heroWorkspaceRow"]') : null;
+            }
+          }
+          if (!row) {
+            const rows = Array.from(document.querySelectorAll('[class*="heroWorkspaceRow"]'));
+            row = rows.find((node) => node.getBoundingClientRect().width > 0) || rows[0];
+          }
+          if (!row) return;
+          const trailing = Array.from(row.children).find(
+            (node) => String(node.className || '').includes('heroOptions'),
+          );
+          if (host.parentElement !== row || (trailing && host.nextElementSibling !== trailing)) {
+            row.insertBefore(host, trailing || null);
+          }
+        };
+        place();
+        const observer = new MutationObserver(place);
+        observer.observe(document.body, { childList: true, subtree: true });
+        window.addEventListener('resize', place);
+        return () => {
+          observer.disconnect();
+          window.removeEventListener('resize', place);
+          host.remove();
+        };
+      }, [active, anchorRef, host]);
+      if (!active) return null;
+      return createPortal(children, host);
+    }
+
+    /**
+     * Branch pill for a blank session hero. It resolves the session cwd from
+     * the shell's session snapshot, probes the workspace for a repository, and
+     * reuses the same branch switcher and dialogs as the Git panel.
+     */
+    function ComposerBranchChip(props) {
+      const sessionId = props.sessionId;
+      const summary = typeof props.useSessions === 'function'
+        ? props.useSessions((state) => (
+            sessionId === undefined ? undefined : state.byId[sessionId]
+          ))
+        : (sessionBridge ? sessionBridge.summary(sessionId) : undefined);
+      const blank = Boolean(
+        (summary && summary.blank === true)
+        || (props.session && props.session.blank === true),
+      );
+      const cwd = (summary && summary.cwd) || (props.session && props.session.cwd) || '';
+
+      const [status, setStatus] = useState(null);
+      const [busy, setBusy] = useState('');
+      const [notice, setNotice] = useState(null);
+      const [dialog, setDialog] = useState(null);
+      const [worktreeBranches, setWorktreeBranches] = useState([]);
+      const seq = useRef(0);
+      const dockRef = useRef(null);
+      const active = Boolean(blank && cwd);
+
+      const refresh = useCallback(async () => {
+        if (!cwd) return null;
+        const id = ++seq.current;
+        try {
+          const next = await rpc('status', { workspace: cwd });
+          if (id === seq.current) {
+            setStatus(next);
+            window.dispatchEvent(new Event('dsh-git:refresh'));
+          }
+          return next;
+        } catch {
+          if (id === seq.current) setStatus(null);
+          return null;
+        }
+      }, [cwd]);
+
+      useEffect(() => {
+        if (!active) {
+          seq.current += 1;
+          setStatus(null);
+          return undefined;
+        }
+        void refresh();
+        const onFocus = () => {
+          if (document.visibilityState === 'visible') void refresh();
+        };
+        window.addEventListener('focus', onFocus);
+        return () => window.removeEventListener('focus', onFocus);
+      }, [active, refresh]);
+
+      useEffect(() => {
+        if (!notice) return undefined;
+        const timer = setTimeout(() => setNotice(null), notice.kind === 'error' ? 9000 : 4500);
+        return () => clearTimeout(timer);
+      }, [notice]);
+
+      const repoRoot = status && status.repoRoot ? status.repoRoot : '';
+      const loadBranches = useCallback(
+        () => rpc('branches', { workspace: cwd, repo: repoRoot }),
+        [cwd, repoRoot],
+      );
+      const fetchGraph = useCallback(
+        (limit) => rpc('graph', { workspace: cwd, repo: repoRoot, limit }),
+        [cwd, repoRoot],
+      );
+
+      const pickBranch = useCallback(async (pick) => {
+        if (!repoRoot) return;
+        const branch = typeof pick === 'string' ? pick : pick.branch;
+        const remoteBranch = pick && typeof pick === 'object' ? pick.remoteBranch : undefined;
+        setBusy(t('checkingOut'));
+        setNotice(null);
+        try {
+          const result = await rpc('checkout', { workspace: cwd, repo: repoRoot, branch, remoteBranch });
+          await refresh();
+          const name = (result && result.branch) || branch;
+          setNotice({
+            kind: 'success',
+            text: result && result.created
+              ? tf('branchTrackingCreated', { branch: name })
+              : tf('branchSwitched', { branch: name }),
+          });
+        } catch (error) {
+          setNotice({ kind: 'error', text: errorText(error), detail: error.detail || null });
+        } finally {
+          setBusy('');
+        }
+      }, [cwd, repoRoot, refresh]);
+
+      const createBranch = useCallback(async (name) => {
+        setBusy(t('creatingBranch'));
+        setNotice(null);
+        try {
+          const result = await rpc('create-branch', { workspace: cwd, repo: repoRoot, name });
+          await refresh();
+          setNotice({ kind: 'success', text: tf('branchCreated', { branch: (result && result.branch) || name }) });
+          return result;
+        } finally {
+          setBusy('');
+        }
+      }, [cwd, repoRoot, refresh]);
+
+      const openWorktreeCreate = useCallback(async () => {
+        try {
+          const next = await loadBranches();
+          const names = (next && Array.isArray(next.local) ? next.local : []).map((item) => item.name);
+          if (status && status.branch && !names.includes(status.branch)) names.unshift(status.branch);
+          if (names.length === 0) {
+            setNotice({ kind: 'error', text: t('worktreeNoBase') });
+            return;
+          }
+          setWorktreeBranches(names);
+          setDialog({ kind: 'worktree-create' });
+        } catch (error) {
+          setNotice({ kind: 'error', text: errorText(error), detail: error.detail || null });
+        }
+      }, [loadBranches, status]);
+
+      const createWorktree = useCallback(async (name, baseRef) => {
+        setBusy(t('worktreeStarting'));
+        setNotice(null);
+        try {
+          const created = await addWorktreeSession(cwd, repoRoot, name, baseRef);
+          setNotice({ kind: 'success', text: tf('worktreeCreated', { name: created.name }) });
+          return created;
+        } finally {
+          setBusy('');
+        }
+      }, [cwd, repoRoot]);
+
+      const fetchWorktrees = useCallback(
+        () => rpc('worktrees', { workspace: cwd, repo: repoRoot }),
+        [cwd, repoRoot],
+      );
+
+      const removeWorktree = useCallback(async (path, options) => {
+        const result = await removeWorktreeSession(cwd, repoRoot, path, options);
+        setNotice({ kind: 'success', text: t('worktreeRemoved') });
+        return result;
+      }, [cwd, repoRoot]);
+
+      // A workspace that collects several independent repositories has no
+      // single branch to show. The Git panel still offers the per-repository
+      // switcher, but the composer entry would be misleading, so hide it.
+      const repoCount = status && Array.isArray(status.repos) ? status.repos.length : 1;
+      if (!active || !status || !status.isRepo || status.isBare || repoCount > 1) return null;
+
+      return h(React.Fragment, null,
+        h('div', {
+          ref: dockRef,
+          className: 'dshg-composer-dock-anchor',
+          style: { display: 'none' },
+          'aria-hidden': true,
+        }),
+        h(HeroRowPortal, { active: true, key: sessionId, anchorRef: dockRef },
+          h(BranchSwitcher, {
+            status,
+            busy,
+            load: loadBranches,
+            onPick: pickBranch,
+            onCreate: () => setDialog({ kind: 'create-branch' }),
+            onGraph: () => setDialog({ kind: 'graph' }),
+            onCreateWorktree: openWorktreeCreate,
+            onManageWorktrees: () => setDialog({ kind: 'worktree-manage' }),
+            hero: true,
+          })),
+        h('div', { className: 'dshg-composer-toast-host' },
+          h(Toast, { toast: notice, onClose: () => setNotice(null) })),
+        dialog && dialog.kind === 'create-branch' ? h(CreateBranchDialog, {
+          onCreate: createBranch,
+          onClose: () => setDialog(null),
+        }) : null,
+        dialog && dialog.kind === 'graph' ? h(GitGraphDialog, {
+          fetchGraph,
+          onClose: () => setDialog(null),
+        }) : null,
+        dialog && dialog.kind === 'worktree-create' ? h(CreateWorktreeDialog, {
+          branches: worktreeBranches,
+          currentBranch: status.branch || '',
+          onCreate: createWorktree,
+          onClose: () => setDialog(null),
+        }) : null,
+        dialog && dialog.kind === 'worktree-manage' ? h(WorktreeManagerDialog, {
+          fetchWorktrees,
+          onRemove: removeWorktree,
+          onClose: () => setDialog(null),
+        }) : null);
+    }
+
     function PanelHeader({
       workspaces, workspace, repos, repo, showAllRepos, status, busy,
       onWorkspace, onRepo, onToggleRepos, onRefresh, onFetch, onPull, onPush,
@@ -3435,8 +3687,8 @@ window.__ModuleLoader__.load({
       /* The composer pill and its menu/dialogs live outside .dshg-root (they
          are portalled into the shell hero row), so they need the same
          border-box contract explicitly. */
-      .dshg-pillselect, .dshg-menu, .dshg-dialog { box-sizing: border-box; }
-      .dshg-pillselect *, .dshg-menu *, .dshg-dialog * { box-sizing: border-box; }
+      .dshg-pillselect, .dshg-menu, .dshg-dialog, .dshg-composer-toast-host { box-sizing: border-box; }
+      .dshg-pillselect *, .dshg-menu *, .dshg-dialog *, .dshg-composer-toast-host * { box-sizing: border-box; }
 
       /* Header ---------------------------------------------------------- */
       .dshg-header {
@@ -3464,6 +3716,23 @@ window.__ModuleLoader__.load({
       .dshg-pillselect-trigger:hover:not(:disabled) { background: var(--dsw-alias-interactive-bg-hover, rgba(127,127,127,.10)); }
       .dshg-pillselect-trigger[aria-expanded="true"] { background: var(--dsw-alias-bg-layer-2, #eef2f7); }
       .dshg-pillselect-trigger:disabled { opacity: .5; cursor: default; }
+      /* Blank-session hero seat: transparent 28px pill, matching the
+         workspace / agent-preset controls beside it. */
+      .dshg-pillselect-hero {
+        height: 28px; max-width: 220px; padding: 0 24px 0 6px;
+        border: 1px solid transparent; border-radius: 16px;
+        background: transparent; color: var(--dsw-alias-label-primary, #111);
+        gap: 4px; font-size: 13px; font-weight: 500; margin-left: 4px;
+      }
+      .dshg-pillselect-hero:hover:not(:disabled),
+      .dshg-pillselect-hero[aria-expanded="true"] {
+        background: var(--dsw-alias-interactive-bg-hover, rgba(127,127,127,.10));
+      }
+      .dshg-pillselect-hero .dshg-pill-strong { font-weight: 500; }
+      .dshg-pillselect-hero .dshg-pillselect-chevron {
+        right: 8px;
+        border-top-color: var(--dsw-alias-label-caption, #9ca3af);
+      }
       .dshg-pillselect-chevron {
         position: absolute; right: 9px; pointer-events: none;
         width: 0; height: 0;
@@ -4095,6 +4364,19 @@ window.__ModuleLoader__.load({
       .dshg-worktree-confirm { display: flex; align-items: center; gap: 8px; margin-top: 2px; color: var(--dshg-git-deleted); font-size: 11px; }
 
       /* Toast ----------------------------------------------------------- */
+      /* Composer chip notices: keep the panel toast styling but place it in
+         the viewport, because the hero row is outside the Git panel. */
+      .dshg-composer-toast-host {
+        position: fixed; top: 20px; left: 50%; transform: translateX(-50%);
+        z-index: 70; pointer-events: none;
+        width: max-content; max-width: calc(100vw - 40px);
+      }
+      .dshg-composer-toast-host:empty { display: none; }
+      .dshg-composer-toast-host .dshg-toast {
+        position: static; pointer-events: auto;
+        max-width: min(520px, calc(100vw - 40px));
+      }
+
       .dshg-toast {
         position: absolute; top: 54px; right: 14px; z-index: 6;
         display: flex; align-items: flex-start; gap: 8px;
@@ -4664,6 +4946,32 @@ window.__ModuleLoader__.load({
           if (worktreeBridge === bridge) worktreeBridge = null;
         };
       });
+
+      // The composer chip normally receives `useSessions` through its slot
+      // props. Keep a direct lookup as a fallback for shells that expose the
+      // session list only through the service.
+      ctx.inject(['sessions'], (scope) => {
+        const bridge = {
+          summary(sessionId) {
+            try {
+              return scope.sessions.list.getSnapshot().byId[sessionId];
+            } catch {
+              return undefined;
+            }
+          },
+        };
+        sessionBridge = bridge;
+        return () => {
+          if (sessionBridge === bridge) sessionBridge = null;
+        };
+      });
+
+      ctx.slots.inject('conversation.input.dock', () => ctx.slots.register({
+        name: 'conversation.input.dock',
+        id: 'git-branch',
+        order: 30,
+        locale: NS,
+      }, ComposerBranchChip));
 
       ctx.effect(() => {
         const onKeyDown = (event) => {
