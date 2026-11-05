@@ -207,6 +207,8 @@ async function buildFixture(base) {
 async function main() {
   const base = await mkdtemp(join(tmpdir(), 'dsh-git-panel-'));
   const fixture = await buildFixture(base);
+  const dshHome = join(base, 'dsh-home');
+  process.env.DSH_HOME = dshHome;
   const handlers = { route: null, disposers: [], spawns: [] };
   const workspaces = [
     { id: 'ws', title: 'fixture', path: fixture.workspace },
@@ -424,7 +426,128 @@ async function main() {
     }, 'BRANCH_NOT_FOUND');
     assert.equal(missingRemote.code, 'BRANCH_NOT_FOUND');
 
-    // 10c. History pages, typed refs, and per-file commit details.
+    // 10c. The branch menu creates a branch from HEAD and refuses duplicates
+    //      or names Git itself rejects.
+    const createdBranch = await ok({
+      op: 'create-branch', workspace: fixture.workspace, repo: fixture.beta, name: 'feature/panel-flow',
+    });
+    assert.equal(createdBranch.branch, 'feature/panel-flow');
+    assert.equal(createdBranch.created, true);
+    const betaBranches = await ok({ op: 'branches', workspace: fixture.workspace, repo: fixture.beta });
+    assert.equal(betaBranches.current, 'feature/panel-flow');
+    await fail({
+      op: 'create-branch', workspace: fixture.workspace, repo: fixture.beta, name: 'feature/panel-flow',
+    }, 'BRANCH_ALREADY_EXISTS');
+    await fail({
+      op: 'create-branch', workspace: fixture.workspace, repo: fixture.beta, name: '..',
+    }, 'INVALID_REF');
+
+    // 10d. Managed worktrees: create, list, dirty guard, force removal, branch
+    //      retention/deletion, and the primary/unmanaged refusals.
+    const initialWorktrees = await ok({ op: 'worktrees', workspace: fixture.workspace, repo: fixture.beta });
+    assert.equal(initialWorktrees.worktrees.length, 1);
+    assert.equal(initialWorktrees.worktrees[0].main, true);
+    assert.equal(initialWorktrees.worktrees[0].branch, 'feature/panel-flow');
+
+    const added = await ok({
+      op: 'worktree-add',
+      workspace: fixture.workspace,
+      repo: fixture.beta,
+      name: 'Fix Login Race',
+      baseRef: 'main',
+    });
+    assert.equal(added.name, 'fix-login-race');
+    assert.equal(added.branch, 'wt/fix-login-race');
+    assert.ok(added.path.startsWith(join(dshHome, 'worktrees')), added.path);
+    assert.match(added.path, /[\\/]worktrees[\\/][^\\/]+[\\/]fix-login-race$/);
+
+    const withWorktree = await ok({ op: 'worktrees', workspace: fixture.workspace, repo: fixture.beta });
+    assert.equal(withWorktree.worktrees.length, 2);
+    const managedRow = withWorktree.worktrees.find((row) => row.path === added.path);
+    assert.ok(managedRow);
+    assert.equal(managedRow.main, false);
+    assert.equal(managedRow.managed, true);
+    assert.equal(managedRow.branch, 'wt/fix-login-race');
+
+    await fail({
+      op: 'worktree-add',
+      workspace: fixture.workspace,
+      repo: fixture.beta,
+      name: 'fix-login-race',
+      baseRef: 'main',
+    }, 'WORKTREE_PATH_EXISTS');
+    await fail({
+      op: 'worktree-add',
+      workspace: fixture.workspace,
+      repo: fixture.beta,
+      name: '..',
+      baseRef: 'main',
+    }, 'WORKTREE_NAME_INVALID');
+    await fail({
+      op: 'worktree-add',
+      workspace: fixture.workspace,
+      repo: fixture.beta,
+      name: 'missing-base',
+      baseRef: 'no-such-branch',
+    }, 'WORKTREE_BASE_NOT_FOUND');
+
+    await writeFile(join(added.path, 'dirty.txt'), 'dirty\n');
+    await fail({
+      op: 'worktree-remove',
+      workspace: fixture.workspace,
+      repo: fixture.beta,
+      path: added.path,
+    }, 'WORKTREE_DIRTY');
+
+    const removed = await ok({
+      op: 'worktree-remove',
+      workspace: fixture.workspace,
+      repo: fixture.beta,
+      path: added.path,
+      force: true,
+    });
+    assert.equal(removed.removed, true);
+    assert.equal(removed.branchDeleted, false);
+    assert.ok(git(fixture.beta, 'branch', '--list', 'wt/fix-login-race').trim());
+
+    const second = await ok({
+      op: 'worktree-add',
+      workspace: fixture.workspace,
+      repo: fixture.beta,
+      name: 'clean-up',
+      baseRef: 'main',
+    });
+    const removedWithBranch = await ok({
+      op: 'worktree-remove',
+      workspace: fixture.workspace,
+      repo: fixture.beta,
+      path: second.path,
+      deleteBranch: true,
+    });
+    assert.equal(removedWithBranch.branchDeleted, true);
+    assert.equal(git(fixture.beta, 'branch', '--list', 'wt/clean-up').trim(), '');
+
+    await fail({
+      op: 'worktree-remove',
+      workspace: fixture.workspace,
+      repo: fixture.beta,
+      path: fixture.beta,
+    }, 'WORKTREE_IS_MAIN');
+
+    // A linked worktree outside the managed home is listed by Git but must
+    // never be removable through this route.
+    const alphaWorktrees = await ok({ op: 'worktrees', workspace: fixture.workspace, repo: fixture.alpha });
+    const linkedRow = alphaWorktrees.worktrees.find((row) => row.path === fixture.delta);
+    assert.ok(linkedRow, JSON.stringify(alphaWorktrees.worktrees));
+    assert.equal(linkedRow.managed, false);
+    await fail({
+      op: 'worktree-remove',
+      workspace: fixture.workspace,
+      repo: fixture.alpha,
+      path: fixture.delta,
+    }, 'WORKTREE_NOT_MANAGED');
+
+    // 10e. History pages, typed refs, and per-file commit details.
     const pageOne = await ok({ op: 'graph', workspace: fixture.workspace, repo: fixture.target, limit: 1 });
     assert.equal(pageOne.commits.length, 1);
     assert.equal(pageOne.hasMore, true);
