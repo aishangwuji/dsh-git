@@ -17,9 +17,39 @@ A local Harness plugin that adds a **Git** panel to the Web UI.
   - nested labels drop their parent's prefix and are marked `↳`.
 - Switches branches from the header: the branch pill opens a switcher with
   `Local` / `Remote` tabs, a filter box, and a fixed-height scrolling list, so
-  long branch lists stay usable. Checking out a remote branch without a local
-  counterpart creates the tracking branch (`git checkout --track`); switching
-  is refused when Git would overwrite local changes.
+  long branch lists stay usable. The remote tab pins the current local branch's
+  upstream to the top while keeping the rest alphabetical. Checking out a remote
+  branch without a local counterpart creates the tracking branch
+  (`git checkout --track`); switching is refused when Git would overwrite local
+  changes.
+- Keeps the branch menu's four bottom actions, matching the reference Git
+  picker: **Create and check out new branch...**, **Git graph**, **Start a new
+  session in a worktree...**, and **Manage worktrees...**.
+- Adds the same branch pill to the blank-session composer hero row, immediately
+  after the agent-preset chip (the `conversation.input.dock` entry portals into
+  the shell's `heroWorkspaceRow`). It appears only for a blank session whose
+  workspace resolves to exactly one Git repository, so active sessions,
+  non-repository workspaces, and multi-repository project folders (where one
+  branch cannot represent the whole workspace) keep the untouched composer.
+- Creates a branch from the current `HEAD` and switches to it immediately. The
+  dialog mirrors `git check-ref-format --branch` for instant feedback while the
+  host remains the authority; duplicate names are reported without touching the
+  working tree.
+- Opens a read-only **Git graph** dialog with the topo-ordered commit list,
+  lane topology, short SHA, refs, author, relative time, and paging. It reuses
+  the same host `graph` operation as the workbench history, so no second Git
+  read path exists.
+- Starts an isolated session from the branch menu: the host creates
+  `$DSH_HOME/worktrees/<repo-key>/<name>` on a new `wt/<name>` branch from the
+  chosen base branch, registers it as a workspace, and opens a blank session
+  there. The current checkout never moves. A registration/session failure rolls
+  the fresh worktree back. The base-branch picker uses the plugin's pill
+  popover (searchable local branches) instead of a native `<select>`.
+- Manages panel-owned worktrees: the dialog lists every linked worktree with
+  its branch, short SHA, and path. The primary checkout is display-only; only
+  paths exactly under the managed home (`<repo-key>/<name>`) can be removed. A
+  dirty worktree rejects once and then offers an inline force confirmation; the
+  `wt/` branch survives removal unless the row's delete-branch checkbox is on.
 - Uses plugin-owned pill popovers for the workspace, repository, and branch
   pickers, so the open list follows the host's pill language instead of the
   operating system's native `<select>` popup.
@@ -92,7 +122,16 @@ A local Harness plugin that adds a **Git** panel to the Web UI.
   than guessing when a workspace holds several repositories.
 - Branch switching runs `git checkout` through the same host route; a dirty tree
   that the target branch would overwrite is reported as `CHECKOUT_DIRTY` instead
-  of being discarded.
+  of being discarded. Creating a branch uses `git checkout -b` after a
+  `check-ref-format --branch` gate, so an invalid name never reaches the index.
+- Worktree writes also go through the argv-only host route. Creation requires a
+  valid ref, a free `wt/<name>` branch, and a free managed directory; removal
+  first proves the path is a direct child of the managed home and is listed by
+  `git worktree list --porcelain`, so a crafted path cannot delete arbitrary
+  files. Dirty worktrees need an explicit force flag. The Client half registers
+  the checkout through the `workspaces` service and opens its blank session
+  through `uiWorkspace.openWorkspace`, so the host never needs a browser-side
+  navigation API.
 - The workspace file tree is decorated in place (status letters, 6px directory
   dots, drag payload). The host's files plugin renders no context menu of its
   own, so this plugin does not add menu rows to it — right-click actions such as
@@ -103,10 +142,18 @@ A local Harness plugin that adds a **Git** panel to the Web UI.
   and polls status every five seconds while visible.
 - The panel is registered as a `main` slot keyed `git` and a
   `sidebar.panellist` icon with the same id, so it is reachable from the sidebar.
+- The composer pill is a `conversation.input.dock` entry, but the shell renders
+  that hole as its own row below the hero controls; the client portals the pill
+  into the visible `heroWorkspaceRow` before the right-aligned `heroOptions`
+  group. A mutation observer re-asserts the seat when the shell replaces the
+  row. The entry renders nothing for a non-blank session, a session without a
+  cwd, or a workspace with no repository; branch reads are lazy and refresh on
+  focus, so a non-repository workspace costs no Git polling.
 - This version intentionally does **not** implement hunk-level staging, stash,
-  worktrees management, submodule updates, LFS, or credential prompts. Use the
-  terminal for interactive authentication (or configure ssh-agent / a credential
-  helper).
+  submodule updates, LFS, or credential prompts. Use the terminal for interactive
+  authentication (or configure ssh-agent / a credential helper). Worktree
+  removal is limited to panel-managed checkouts; linked worktrees outside the
+  managed home stay visible but read-only.
 
 ## Troubleshooting
 
@@ -130,5 +177,6 @@ A local Harness plugin that adds a **Git** panel to the Web UI.
   repository, and branch switchers: full visual spec, states, variants, and a
   copy-paste checklist for reusing it in another panel.
 - `test/host.test.mjs` — route-level checks over a throwaway fixture workspace
-  that reproduces nested, ignored, worktree, bare, and enclosing repositories.
-  Run with `node test/host.test.mjs` (needs `git` on `PATH`).
+  that reproduces nested, ignored, worktree, bare, and enclosing repositories,
+  plus branch creation and managed-worktree create/list/remove safety. Run with
+  `node test/host.test.mjs` (needs `git` on `PATH`).
