@@ -1021,6 +1021,42 @@ export function apply(ctx) {
     return stats;
   }
 
+  /** Aggregate `+additions/-deletions` across a commit range. */
+  async function readNumstatRange(root, range, signal) {
+    const result = await runGit(root, ['diff', '--numstat', '--no-renames', '-z', range], {
+      signal,
+      timeoutMs: 30_000,
+    });
+    const stats = { files: 0, additions: 0, deletions: 0 };
+    if (result.code !== 0) return stats;
+    for (const record of result.stdout.split('\0')) {
+      if (!record) continue;
+      const [added, deleted, filePath] = record.split('\t');
+      if (!filePath) continue;
+      stats.files += 1;
+      stats.additions += added === '-' ? 0 : Number(added) || 0;
+      stats.deletions += deleted === '-' ? 0 : Number(deleted) || 0;
+    }
+    return stats;
+  }
+
+  /** Parse `git fetch --all --porcelain` into changed ref updates. */
+  function parseFetchPorcelain(stdout) {
+    const updates = [];
+    for (const line of stdout.split('\n')) {
+      const trimmed = line.trim();
+      if (!trimmed) continue;
+      const fields = trimmed.split(/\s+/);
+      if (fields.length < 3) continue;
+      const [oldOid, newOid, ref] = fields.slice(-3);
+      if (!ref || !ref.startsWith('refs/') || ref.endsWith('/HEAD')) continue;
+      if (!/^[0-9a-f]{7,64}$/i.test(oldOid) || !/^[0-9a-f]{7,64}$/i.test(newOid)) continue;
+      if (oldOid === newOid) continue;
+      updates.push({ ref, old: oldOid, new: newOid });
+    }
+    return updates;
+  }
+
   /** Full status of one repository: file entries plus stats, remotes, identity. */
   async function readRepoStatus(repoRoot, signal) {
     const snapshot = await readRepoSnapshot(repoRoot, signal);
@@ -1422,9 +1458,32 @@ export function apply(ctx) {
     const root = await operationRepo(workspacePath, repoValue, signal);
     const status = await readRepoStatus(root, signal);
     if (status.remotes.length === 0) throw new GitError('NO_REMOTE', '没有配置远程仓库');
-    const result = await runGit(root, ['fetch', '--all'], { signal, timeoutMs: REMOTE_TIMEOUT });
+    const result = await runGit(root, ['fetch', '--all', '--porcelain'], { signal, timeoutMs: REMOTE_TIMEOUT });
     if (result.code !== 0) throw remoteFailure(result);
-    return { output: `${result.stdout}\n${result.stderr}`.trim() };
+
+    const updates = parseFetchPorcelain(result.stdout);
+    invalidateRepo(root);
+    let behind = 0;
+    let ahead = 0;
+    if (!status.isBare) {
+      try {
+        const after = await readRepoSnapshot(root, signal);
+        behind = after.behind || 0;
+        ahead = after.ahead || 0;
+      } catch {
+        // The fetch succeeded; a status read failure only drops the hint.
+      }
+    }
+    return {
+      remotes: status.remotes.length,
+      updatedRefs: updates.length,
+      updatedBranches: updates.filter((update) => update.ref.startsWith('refs/remotes/')).length,
+      updatedTags: updates.filter((update) => update.ref.startsWith('refs/tags/')).length,
+      updates: updates.slice(0, 100),
+      behind,
+      ahead,
+      output: `${result.stdout}\n${result.stderr}`.trim(),
+    };
   }
 
   async function pullRemote(workspacePath, repoValue, signal) {
@@ -1437,9 +1496,35 @@ export function apply(ctx) {
       const remote = await remoteForBranch(root, status.branch, signal);
       args.push(remote, safeRef(status.branch));
     }
+
+    const beforeHead = await runGit(root, ['rev-parse', 'HEAD'], { signal, timeoutMs: 10_000 });
     const result = await runGit(root, args, { signal, timeoutMs: REMOTE_TIMEOUT });
     if (result.code !== 0) throw remoteFailure(result);
-    return { output: `${result.stdout}\n${result.stderr}`.trim() };
+    invalidateRepo(root);
+
+    let updated = false;
+    let commits = 0;
+    let stats = { files: 0, additions: 0, deletions: 0 };
+    const before = beforeHead.code === 0 ? beforeHead.stdout.trim() : '';
+    const afterHead = await runGit(root, ['rev-parse', 'HEAD'], { signal, timeoutMs: 10_000 });
+    const after = afterHead.code === 0 ? afterHead.stdout.trim() : '';
+    if (before && after && before !== after) {
+      updated = true;
+      const count = await runGit(root, ['rev-list', '--count', `${before}..${after}`], {
+        signal,
+        timeoutMs: 20_000,
+      });
+      commits = count.code === 0 ? Number(count.stdout.trim()) || 0 : 0;
+      stats = await readNumstatRange(root, `${before}..${after}`, signal);
+    }
+
+    return {
+      updated,
+      commits,
+      ...stats,
+      branch: status.branch,
+      output: `${result.stdout}\n${result.stderr}`.trim(),
+    };
   }
 
   async function pushRemote(workspacePath, repoValue, signal) {
@@ -1448,14 +1533,24 @@ export function apply(ctx) {
     if (!status.branch) throw new GitError('DETACHED_HEAD', '分离 HEAD 状态下无法推送');
 
     const upstream = await runGit(root, ['rev-parse', '--verify', '--quiet', '@{u}'], { signal, timeoutMs: 10_000 });
+    const newBranch = upstream.code !== 0;
     const args = ['push', '--porcelain'];
-    if (upstream.code !== 0) {
+    if (newBranch) {
       const remote = await remoteForBranch(root, status.branch, signal);
       args.push('-u', remote, `${safeRef(status.branch)}:${safeRef(status.branch)}`);
     }
     const result = await runGit(root, args, { signal, timeoutMs: REMOTE_TIMEOUT });
     if (result.code !== 0) throw remoteFailure(result);
-    return { output: `${result.stdout}\n${result.stderr}`.trim() };
+    invalidateRepo(root);
+
+    const updated = newBranch || (status.ahead || 0) > 0;
+    return {
+      branch: status.branch,
+      newBranch,
+      updated,
+      pushedCommits: updated && !newBranch ? status.ahead || 0 : 0,
+      output: `${result.stdout}\n${result.stderr}`.trim(),
+    };
   }
 
   async function initRepo(workspacePath, signal) {

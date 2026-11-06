@@ -599,6 +599,48 @@ async function main() {
     assert.match(filePatch.patch, /built\.txt/);
     assert.equal(filePatch.patch.trim(), commitDetail.patch.trim());
 
+    // 10g. Fetch/pull/push return the rough numbers the toast summarizes:
+    //      changed refs and drift, pulled commits/files, pushed commit count.
+    const remoteWork = join(base, 'remote-work');
+    execFileSync(GIT, ['clone', '-q', '-b', 'main', fixture.bare, remoteWork], {
+      encoding: 'utf8',
+      stdio: ['ignore', 'pipe', 'pipe'],
+    });
+    git(remoteWork, 'config', 'user.name', 'Fixture');
+    git(remoteWork, 'config', 'user.email', 'fixture@example.com');
+    await writeFile(join(remoteWork, 'remote.txt'), 'remote\n');
+    git(remoteWork, 'add', '-A');
+    git(remoteWork, 'commit', '-m', 'remote update');
+    git(remoteWork, 'push', '-q', 'origin', 'main');
+
+    const fetched = await ok({ op: 'fetch', workspace: fixture.workspace, repo: fixture.target });
+    assert.equal(fetched.remotes, 1);
+    assert.equal(fetched.updatedRefs, 1);
+    assert.equal(fetched.updatedBranches, 1);
+    assert.equal(fetched.updatedTags, 0);
+    assert.equal(fetched.behind, 1);
+    assert.equal(fetched.ahead, 0);
+    assert.ok(fetched.updates.some((update) => update.ref === 'refs/remotes/origin/main'));
+
+    const pulled = await ok({ op: 'pull', workspace: fixture.workspace, repo: fixture.target });
+    assert.equal(pulled.updated, true);
+    assert.equal(pulled.commits, 1);
+    assert.equal(pulled.files, 1);
+    assert.ok(pulled.additions >= 1);
+
+    const noPush = await ok({ op: 'push', workspace: fixture.workspace, repo: fixture.target });
+    assert.equal(noPush.updated, false);
+    assert.equal(noPush.newBranch, false);
+
+    await writeFile(join(fixture.target, 'local.txt'), 'local\n');
+    git(fixture.target, 'add', '-A');
+    git(fixture.target, 'commit', '-m', 'local update');
+    await wait(1600);
+    const pushed = await ok({ op: 'push', workspace: fixture.workspace, repo: fixture.target });
+    assert.equal(pushed.updated, true);
+    assert.equal(pushed.newBranch, false);
+    assert.equal(pushed.pushedCommits, 1);
+
     // 11. A workspace inside a repository reports the enclosing repository
     //     (Zed keeps this as an external work directory) with the root as cwd.
     const enclosing = await ok({ op: 'status', workspace: fixture.sub });

@@ -49,6 +49,15 @@ window.__ModuleLoader__.load({
       fetch: '获取',
       pull: '拉取',
       push: '推送',
+      fetchUpToDate: '获取完成 · {remotes} 个远程均无更新',
+      fetchUpdated: '获取完成 · 更新 {refs} 个引用 · {remotes} 个远程',
+      fetchBehind: '当前分支落后 {count} 个提交',
+      fetchAhead: '当前分支领先 {count} 个提交',
+      pullUpToDate: '拉取完成 · 已是最新',
+      pullUpdated: '拉取完成 · {commits} 个提交 · {files} 个文件',
+      pushUpToDate: '推送完成 · 已是最新',
+      pushUpdated: '推送完成 · {commits} 个提交',
+      pushNewBranch: '已推送新分支 {branch}',
       commit: '提交',
       commitTracked: '提交已跟踪更改',
       committing: '正在提交…',
@@ -267,6 +276,15 @@ window.__ModuleLoader__.load({
       fetch: 'Fetch',
       pull: 'Pull',
       push: 'Push',
+      fetchUpToDate: 'Fetched · {remotes} remotes, no updates',
+      fetchUpdated: 'Fetched · {refs} refs updated · {remotes} remotes',
+      fetchBehind: 'branch is {count} commits behind',
+      fetchAhead: 'branch is {count} commits ahead',
+      pullUpToDate: 'Pulled · already up to date',
+      pullUpdated: 'Pulled · {commits} commits · {files} files',
+      pushUpToDate: 'Pushed · already up to date',
+      pushUpdated: 'Pushed · {commits} commits',
+      pushNewBranch: 'Pushed new branch {branch}',
       commit: 'Commit',
       commitTracked: 'Commit tracked changes',
       committing: 'Committing…',
@@ -484,6 +502,60 @@ window.__ModuleLoader__.load({
         if (translated !== key) return translated;
       }
       return (error && (error.message || (error.rpcError && error.rpcError.message))) || t('err_UNKNOWN');
+    }
+
+    /** One-line summary for the fetch toast: refs, remotes, and branch drift. */
+    function fetchSummary(result) {
+      const remotes = Number(result && result.remotes) || 0;
+      const refs = Number(result && result.updatedRefs) || 0;
+      const behind = Number(result && result.behind) || 0;
+      const ahead = Number(result && result.ahead) || 0;
+      if (refs === 0) {
+        let text = tf('fetchUpToDate', { remotes });
+        if (behind > 0) text += ` · ${tf('fetchBehind', { count: behind })}`;
+        if (ahead > 0) text += ` · ${tf('fetchAhead', { count: ahead })}`;
+        return text;
+      }
+      let text = tf('fetchUpdated', { refs, remotes });
+      if (behind > 0) text += ` · ${tf('fetchBehind', { count: behind })}`;
+      if (ahead > 0) text += ` · ${tf('fetchAhead', { count: ahead })}`;
+      return text;
+    }
+
+    /** Expandable fetch detail: one old..new line per changed ref. */
+    function fetchDetail(result) {
+      const lines = ((result && result.updates) || []).slice(0, 80).map((update) => {
+        const ref = String(update.ref || '')
+          .replace(/^refs\/remotes\//, '')
+          .replace(/^refs\/tags\//, 'tag: ')
+          .replace(/^refs\/heads\//, '');
+        const oldOid = String(update.old || '').slice(0, 7);
+        const newOid = String(update.new || '').slice(0, 7);
+        return `${ref}  ${oldOid} → ${newOid}`;
+      });
+      if (result && result.output && lines.length === 0) lines.push(String(result.output));
+      return lines.join('\n').slice(0, 4000);
+    }
+
+    /** One-line summary for the pull toast. */
+    function pullSummary(result) {
+      if (!result || !result.updated) return t('pullUpToDate');
+      let text = tf('pullUpdated', {
+        commits: Number(result.commits) || 0,
+        files: Number(result.files) || 0,
+      });
+      const additions = Number(result.additions) || 0;
+      const deletions = Number(result.deletions) || 0;
+      if (additions + deletions > 0) text += ` · +${additions} −${deletions}`;
+      return text;
+    }
+
+    /** One-line summary for the push toast. */
+    function pushSummary(result) {
+      if (!result) return t('pushUpToDate');
+      if (result.newBranch) return tf('pushNewBranch', { branch: result.branch || '' });
+      if (!result.updated) return t('pushUpToDate');
+      return tf('pushUpdated', { commits: Number(result.pushedCommits) || 0 });
     }
 
     function cx(...values) {
@@ -2737,6 +2809,24 @@ window.__ModuleLoader__.load({
             }, busy ? t('committing') : title))));
     }
 
+    /** Formatted expandable detail: ref moves get columns, raw Git output stays code. */
+    function ToastDetail({ text }) {
+      const lines = String(text || '').slice(0, 4000).split(/\r?\n/);
+      return h('div', { className: 'dshg-toast-detail-body' },
+        lines.map((line, index) => {
+          const move = /^(.+?)\s{2}([0-9a-f]{7,64})\s*→\s*([0-9a-f]{7,64})$/.exec(line);
+          if (move) {
+            return h('div', { className: 'dshg-toast-ref', key: index },
+              h('span', { className: 'dshg-toast-ref-name', title: move[1] }, move[1]),
+              h('span', { className: 'dshg-toast-ref-oid' }, move[2]),
+              h('span', { className: 'dshg-toast-ref-arrow' }, '→'),
+              h('span', { className: 'dshg-toast-ref-oid' }, move[3]));
+          }
+          if (line === '') return h('div', { className: 'dshg-toast-detail-gap', key: index });
+          return h('div', { className: 'dshg-toast-detail-line', key: index }, line);
+        }));
+    }
+
     function Toast({ toast, onClose }) {
       if (!toast) return null;
       return h('div', { className: cx('dshg-toast', toast.kind === 'error' ? 'error' : 'success'), role: toast.kind === 'error' ? 'alert' : 'status' },
@@ -2744,7 +2834,7 @@ window.__ModuleLoader__.load({
           h('div', { className: 'dshg-toast-text' }, toast.text),
           toast.detail ? h('details', { className: 'dshg-toast-details' },
             h('summary', null, t('details')),
-            h('pre', null, String(toast.detail).slice(0, 4000))) : null),
+            h(ToastDetail, { text: toast.detail })) : null),
         h('button', { type: 'button', className: 'dshg-iconbtn', onClick: onClose, 'aria-label': t('close') },
           h(IconClose, { size: 13 })));
     }
@@ -2912,7 +3002,9 @@ window.__ModuleLoader__.load({
         setToast(null);
         try {
           const result = await operation();
-          if (result && result.message) setToast({ kind: 'success', text: result.message });
+          if (result && result.message) {
+            setToast({ kind: 'success', text: result.message, detail: result.detail || null });
+          }
           return result;
         } catch (error) {
           setToast({ kind: 'error', text: errorText(error), detail: error.detail || null });
@@ -3113,7 +3205,10 @@ window.__ModuleLoader__.load({
 
       useEffect(() => {
         if (!toast) return;
-        const timer = setTimeout(() => setToast(null), toast.kind === 'error' ? 9000 : 4500);
+        const timer = setTimeout(
+          () => setToast(null),
+          toast.kind === 'error' ? 9000 : (toast.detail ? 8000 : 5000),
+        );
         return () => clearTimeout(timer);
       }, [toast]);
 
@@ -3244,25 +3339,34 @@ window.__ModuleLoader__.load({
 
       const fetchRemote = useCallback(async () => {
         await act(t('fetch'), async () => {
-          await rpc('fetch', { workspace, repo });
+          const result = await rpc('fetch', { workspace, repo });
           await reloadAfterMutation(true);
-          return { message: t('fetch') };
+          return {
+            message: fetchSummary(result),
+            detail: fetchDetail(result),
+          };
         });
       }, [workspace, repo, act, reloadAfterMutation]);
 
       const pullRemote = useCallback(async () => {
         await act(t('pull'), async () => {
-          await rpc('pull', { workspace, repo });
+          const result = await rpc('pull', { workspace, repo });
           await reloadAfterMutation(true);
-          return { message: t('pull') };
+          return {
+            message: pullSummary(result),
+            detail: result && result.output ? result.output : null,
+          };
         });
       }, [workspace, act, reloadAfterMutation]);
 
       const pushRemote = useCallback(async () => {
         await act(t('push'), async () => {
-          await rpc('push', { workspace, repo });
+          const result = await rpc('push', { workspace, repo });
           await reloadAfterMutation(true);
-          return { message: t('push') };
+          return {
+            message: pushSummary(result),
+            detail: result && result.output ? result.output : null,
+          };
         });
       }, [workspace, repo, act, reloadAfterMutation]);
 
@@ -4014,12 +4118,12 @@ window.__ModuleLoader__.load({
       .dshg-segmented { display: inline-flex; padding: 2px; border: 0; border-radius: 999px; background: var(--dsw-alias-bg-layer-1, #f4f5f7); }
       .dshg-seg { height: 22px; padding: 0 10px; border: 0; border-radius: 999px; background: transparent; color: var(--dsw-alias-label-secondary, #6b7280); font: inherit; font-size: 11px; cursor: pointer; }
       .dshg-seg.active { background: var(--dsw-alias-bg-base, #fff); color: var(--dsw-alias-label-primary, #111); box-shadow: 0 1px 2px rgba(0,0,0,.08); }
-      .dshg-diff-body { flex: 1 1 auto; min-height: 0; overflow: auto; background: var(--dsw-alias-bg-base, #fff); }
+      .dshg-diff-body { flex: 1 1 auto; min-height: 0; overflow-y: auto; overflow-x: hidden; background: var(--dsw-alias-bg-base, #fff); }
       .dshg-diff-wrap { padding: 2px 0 18px; }
       .dshg-diff { margin: 0; font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, "Liberation Mono", monospace; font-size: 11.5px; line-height: 1.55; tab-size: 4; }
-      .dshg-line { display: grid; grid-template-columns: 42px 42px minmax(0, 1fr); min-height: 18px; padding: 0; white-space: pre; color: var(--dsw-alias-label-primary, #111); }
+      .dshg-line { display: grid; grid-template-columns: 42px 42px minmax(0, 1fr); min-height: 18px; padding: 0; white-space: pre-wrap; overflow-wrap: anywhere; color: var(--dsw-alias-label-primary, #111); }
       .dshg-ln { text-align: right; padding-right: 7px; color: var(--dsw-alias-label-tertiary, #6b7280); opacity: .55; user-select: none; font-variant-numeric: tabular-nums; border-right: 1px solid var(--dsw-alias-border-l1, #e5e7eb); margin-right: 8px; }
-      .dshg-code { padding-right: 12px; overflow: visible; }
+      .dshg-code { min-width: 0; padding-right: 12px; overflow-wrap: anywhere; word-break: break-word; }
       .dshg-line-add { background: color-mix(in srgb, var(--dsw-alias-state-success-primary, #16a34a) 9%, transparent); }
       .dshg-line-del { background: color-mix(in srgb, var(--dsw-alias-state-error-primary, #dc2626) 9%, transparent); }
       .dshg-line-hunk, .dshg-line-meta { display: block; padding: 2px 12px; }
@@ -4098,7 +4202,7 @@ window.__ModuleLoader__.load({
         border-bottom: 1px solid var(--dsw-alias-border-l1, #e5e7eb);
       }
       .dshg-detail-head .dshg-iconbtn { width: 24px; height: 24px; }
-      .dshg-detail-scroll { flex: 1 1 auto; min-height: 0; overflow: auto; padding: 12px; }
+      .dshg-detail-scroll { flex: 1 1 auto; min-height: 0; overflow-y: auto; overflow-x: hidden; padding: 12px; }
       .dshg-detail-card {
         display: flex; flex-direction: column;
         padding: 16px 14px 12px; border-radius: 14px;
@@ -4380,7 +4484,7 @@ window.__ModuleLoader__.load({
       .dshg-toast {
         position: absolute; top: 54px; right: 14px; z-index: 6;
         display: flex; align-items: flex-start; gap: 8px;
-        max-width: min(520px, calc(100% - 28px));
+        max-width: min(640px, calc(100% - 28px));
         padding: 9px 12px; border-radius: 14px;
         border: 1px solid var(--dsw-alias-border-l1, #e5e7eb);
         background: var(--dsw-alias-bg-overlay, #fff);
@@ -4388,10 +4492,53 @@ window.__ModuleLoader__.load({
         font-size: 12px;
       }
       .dshg-toast.error { border-color: color-mix(in srgb, var(--dshg-git-deleted) 55%, transparent); }
-      .dshg-toast-main { min-width: 0; }
-      .dshg-toast-text { line-height: 1.45; }
-      .dshg-toast-details { margin-top: 4px; color: var(--dsw-alias-label-tertiary, #6b7280); }
-      .dshg-toast-details pre { max-height: 160px; overflow: auto; white-space: pre-wrap; font-size: 10px; margin: 4px 0 0; }
+      .dshg-toast-main { flex: 1 1 auto; min-width: 0; }
+      .dshg-toast-text { line-height: 1.5; font-size: 12.5px; }
+      .dshg-toast-details { margin-top: 6px; color: var(--dsw-alias-label-tertiary, #6b7280); }
+      .dshg-toast-details summary {
+        display: inline-flex; align-items: center; gap: 5px;
+        width: max-content; padding: 2px 0; border-radius: 4px;
+        color: var(--dsw-alias-label-secondary, #6b7280);
+        font-size: 11.5px; cursor: pointer; list-style: none;
+        user-select: none;
+      }
+      .dshg-toast-details summary::-webkit-details-marker { display: none; }
+      .dshg-toast-details summary::before {
+        content: ''; width: 0; height: 0;
+        border-left: 4px solid transparent; border-right: 4px solid transparent;
+        border-top: 5px solid var(--dsw-alias-label-tertiary, #6b7280);
+        transform: rotate(-90deg); transition: transform .15s ease;
+      }
+      .dshg-toast-details[open] summary::before { transform: rotate(0deg); }
+      .dshg-toast-details summary:hover { color: var(--dsw-alias-label-primary, #111); }
+      .dshg-toast-detail-body {
+        max-height: 220px; overflow-y: auto; overflow-x: hidden;
+        margin-top: 6px; padding: 8px 10px;
+        border: 1px solid var(--dsw-alias-border-l1, #e5e7eb); border-radius: 8px;
+        background: var(--dsw-alias-bg-layer-1, #f7f8fa);
+        font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+        font-size: 12px; line-height: 1.6; tab-size: 2;
+      }
+      .dshg-toast-detail-line {
+        color: var(--dsw-alias-label-secondary, #6b7280);
+        white-space: pre-wrap; overflow-wrap: anywhere; word-break: break-word;
+      }
+      .dshg-toast-detail-gap { height: 6px; }
+      .dshg-toast-ref {
+        display: flex; align-items: center; gap: 6px; min-width: 0;
+        padding: 2px 0;
+      }
+      .dshg-toast-ref + .dshg-toast-ref { border-top: 1px dashed var(--dsw-alias-border-l1, #e5e7eb); }
+      .dshg-toast-ref-name {
+        flex: 1 1 auto; min-width: 0; overflow: hidden; text-overflow: ellipsis;
+        white-space: nowrap; color: var(--dsw-alias-label-primary, #111); font-weight: 500;
+      }
+      .dshg-toast-ref-oid {
+        flex: 0 0 auto; padding: 0 4px; border-radius: 4px;
+        background: var(--dsw-alias-bg-layer-2, #eef2f7);
+        color: var(--dsw-alias-label-tertiary, #6b7280); font-size: 10.5px;
+      }
+      .dshg-toast-ref-arrow { flex: 0 0 auto; color: var(--dsw-alias-label-tertiary, #6b7280); }
 
       /* Overview -------------------------------------------------------- */
       .dshg-overview { flex: 1 1 auto; display: flex; align-items: flex-start; justify-content: center; padding: 26px 24px; overflow: auto; }
