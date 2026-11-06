@@ -1097,8 +1097,12 @@ export function apply(ctx) {
 
     const limit = Math.min(Math.max(Number(payload && payload.limit) || 200, 1), 500);
     const skip = Math.max(Number(payload && payload.skip) || 0, 0);
+    // The workbench history follows the checked-out branch; the explicit
+    // Git-graph dialog asks for `all: true` when it wants every ref.
+    const allRefs = payload && payload.all === true;
     const logArgs = [
-      'log', '--topo-order', '--format=%H%x00%P%x00%an%x00%at%x00%s', '-n', String(limit + 1), '--all',
+      'log', '--topo-order', '--format=%H%x00%P%x00%an%x00%at%x00%s', '-n', String(limit + 1),
+      allRefs ? '--all' : 'HEAD',
     ];
     if (skip > 0) logArgs.push(`--skip=${skip}`);
     const log = await runGit(root, logArgs, { signal, timeoutMs: 30_000 });

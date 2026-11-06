@@ -547,11 +547,29 @@ async function main() {
       path: fixture.delta,
     }, 'WORKTREE_NOT_MANAGED');
 
-    // 10e. History pages, typed refs, and per-file commit details.
-    const pageOne = await ok({ op: 'graph', workspace: fixture.workspace, repo: fixture.target, limit: 1 });
+    // 10e. The workbench history follows the checked-out branch; switching
+    //      branches changes the visible commit set.
+    const mainHistory = await ok({ op: 'graph', workspace: fixture.workspace, repo: fixture.target });
+    assert.equal(mainHistory.commits.length, 1);
+    assert.equal(mainHistory.commits[0].subject, 'target root');
+    assert.equal(mainHistory.hasMore, false);
+
+    await ok({ op: 'checkout', workspace: fixture.workspace, repo: fixture.target, branch: 'feature' });
+    const featureHistory = await ok({ op: 'graph', workspace: fixture.workspace, repo: fixture.target });
+    assert.equal(featureHistory.commits[0].subject, 'feature side');
+    assert.ok(featureHistory.commits.some((commit) => commit.subject === 'target root'));
+    await ok({ op: 'checkout', workspace: fixture.workspace, repo: fixture.target, branch: 'main' });
+
+    // 10f. The explicit all-refs graph still pages across every branch and
+    //      carries typed refs and per-file commit details.
+    const pageOne = await ok({
+      op: 'graph', workspace: fixture.workspace, repo: fixture.target, limit: 1, all: true,
+    });
     assert.equal(pageOne.commits.length, 1);
     assert.equal(pageOne.hasMore, true);
-    const pageTwo = await ok({ op: 'graph', workspace: fixture.workspace, repo: fixture.target, limit: 1, skip: 1 });
+    const pageTwo = await ok({
+      op: 'graph', workspace: fixture.workspace, repo: fixture.target, limit: 1, skip: 1, all: true,
+    });
     assert.equal(pageTwo.commits.length, 1);
     assert.equal(pageTwo.hasMore, false);
     assert.notEqual(pageOne.commits[0].sha, pageTwo.commits[0].sha);

@@ -1990,7 +1990,7 @@ window.__ModuleLoader__.load({
         [cwd, repoRoot],
       );
       const fetchGraph = useCallback(
-        (limit) => rpc('graph', { workspace: cwd, repo: repoRoot, limit }),
+        (limit) => rpc('graph', { workspace: cwd, repo: repoRoot, limit, all: true }),
         [cwd, repoRoot],
       );
 
@@ -2962,7 +2962,7 @@ window.__ModuleLoader__.load({
       }, [workspace, repo, refreshStatus]);
 
       const fetchGraphDialog = useCallback(async (limit) => {
-        return rpc('graph', { workspace, repo, limit });
+        return rpc('graph', { workspace, repo, limit, all: true });
       }, [workspace, repo]);
 
       const openWorktreeCreate = useCallback(async () => {
