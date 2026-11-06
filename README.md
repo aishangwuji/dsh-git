@@ -37,8 +37,8 @@ A local Harness plugin that adds a **Git** panel to the Web UI.
   working tree.
 - Opens a read-only **Git graph** dialog with the topo-ordered commit list,
   lane topology, short SHA, refs, author, relative time, and paging. It reuses
-  the same host `graph` operation as the workbench history, so no second Git
-  read path exists.
+  the same host `graph` operation as the workbench history with `all: true`, so
+  there is no second Git read path and the dialog can still show every branch.
 - Starts an isolated session from the branch menu: the host creates
   `$DSH_HOME/worktrees/<repo-key>/<name>` on a new `wt/<name>` branch from the
   chosen base branch, registers it as a workspace, and opens a blank session
@@ -75,8 +75,11 @@ A local Harness plugin that adds a **Git** panel to the Web UI.
   box on the left, the commit history in the middle, and the selected diff or
   commit details on the right. Drag the splitter between panes to resize them
   (double-click resets, arrow keys nudge 16px); widths are remembered per profile.
-- Shows the history as a table (graph, description, date, author, SHA) with
-  branch/tag pills, a commit filter, and `Load more` paging (200 commits a page).
+- Shows the checked-out branch's reachable history as a table (graph, description,
+  date, author, SHA) with branch/tag pills, a commit filter, and `Load more` paging
+  (200 commits a page). Switching branches re-reads this history; the **Git graph**
+  dialog deliberately keeps the all-refs view so a branch comparison is one click
+  away.
 - Opens commit details as a card, like Zed's commit view: initials avatar, author,
   date, email, full hash with a copy button, parent commits, a "view on GitHub /
   GitLab / Gitee" link derived from the origin remote, the message, and the
@@ -87,6 +90,10 @@ A local Harness plugin that adds a **Git** panel to the Web UI.
 - Commits staged changes, or auto-stages tracked changes when nothing is staged
   (`Commit tracked changes`); supports amend and sign-off.
 - Fetches, pulls, and pushes through the same Git binary the terminal uses.
+- The fetch/pull/push toast carries a one-line summary instead of just the verb:
+  changed refs and branch drift for fetch, pulled commits/files and line totals
+  for pull, and pushed commit count or new-branch notice for push. The raw Git
+  output stays available in the toast's `Details` disclosure.
 - Decorates the workspace file tree and the preview header with per-file status from
   **all** repositories at once, and summarizes the workspace in the sidebar footer.
 - Keyboard shortcuts while the panel is focused:
@@ -124,6 +131,9 @@ A local Harness plugin that adds a **Git** panel to the Web UI.
   that the target branch would overwrite is reported as `CHECKOUT_DIRTY` instead
   of being discarded. Creating a branch uses `git checkout -b` after a
   `check-ref-format --branch` gate, so an invalid name never reaches the index.
+- The workbench history reads `git log HEAD`, so it follows the checked-out
+  branch; the graph dialog passes `all: true` to read every ref. Both share the
+  same `graph` operation, paging, and ref decoding.
 - Worktree writes also go through the argv-only host route. Creation requires a
   valid ref, a free `wt/<name>` branch, and a free managed directory; removal
   first proves the path is a direct child of the managed home and is listed by
