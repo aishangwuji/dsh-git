@@ -8,17 +8,17 @@ Requires DeepSeek Harness 0.2.x and `pnpm` on `PATH` (DSH ships both). The plugi
 the DSH host process — there is nothing to build at install time.
 
 ```powershell
-dsh plugin --profile <your profile> add @aishangwuji/dsh-git-plus
+dsh plugin --profile <your profile> add @aishangwuji/dsh-git
 ```
 
 Then open **Plugins → Installed plugins**, switch the bundle on, and refresh the page (restart
 DSH if the sidebar does not update). The Git panel appears in the sidebar, plus the branch pill
 in a blank session's composer.
 
-- **Upgrade**: `dsh plugin --profile <p> add @aishangwuji/dsh-git-plus@<version>`, or use
+- **Upgrade**: `dsh plugin --profile <p> add @aishangwuji/dsh-git@<version>`, or use
   **Versions → Update** on the bundle page (registry installs list newer versions there).
 - **Uninstall**: **Remove** on the same page; this stops the panel.
-- The package is scoped because unscoped `dsh-git-panel` / `dsh-git-workbench` / `dsh-git-plus`
+- The package is scoped because unscoped `dsh-git-panel` / `dsh-git-workbench` / `dsh-git`
   are already published by other DSH Git-panel plugins.
 
 ## What it does

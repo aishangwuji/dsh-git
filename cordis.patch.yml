@@ -1,4 +1,4 @@
 - insert:
-    - id: dsh-git-plus
-      name: '@aishangwuji/dsh-git-plus'
+    - id: dsh-git
+      name: '@aishangwuji/dsh-git'
       config: {}
