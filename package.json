@@ -1,10 +1,15 @@
 {
   "name": "@aishangwuji/dsh-git-plus",
-  "version": "0.1.0",
+  "version": "0.1.1",
   "type": "module",
   "description": "A Git workbench for DSH workspaces: colored file status, changes tree, commit graph, branch creation, isolated worktree sessions, and fetch/pull/push/commit actions.",
   "license": "MIT",
   "author": "aishangwuji",
+  "homepage": "https://github.com/aishangwuji/dsh-git-plus#readme",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/aishangwuji/dsh-git-plus.git"
+  },
   "keywords": [
     "dsh",
     "deepseek-harness",
