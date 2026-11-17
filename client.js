@@ -1,5 +1,5 @@
 window.__ModuleLoader__.load({
-  id: '@local/dsh-git-panel',
+  id: '@aishangwuji/dsh-git-plus',
   factory(require) {
     const React = require('react');
     const { createPortal } = require('react-dom');
