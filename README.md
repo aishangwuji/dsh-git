@@ -23,6 +23,13 @@ in a blank session's composer.
 
 ## What it does
 
+- **Opens on real Git data instead of a spinner.** The panel paints the last page
+  it showed for that workspace — branch, changed files with `+/-` counts, history
+  — on the first frame and revalidates behind it. A prewarm read shortly after
+  the client boots fills that cache for the workspace the panel will open on, so
+  even the first open in a workspace does not wait for repository discovery. A
+  genuinely cold start (no cache yet) shows the panel's three-pane skeleton
+  rather than an empty box.
 - Discovers **every Git repository inside the workspace**, not only the one at the
   workspace root: sibling projects (`workspace/DS-Bot`), repositories nested inside
   another repository, linked worktrees (`.git` file), submodules, and bare checkouts.
@@ -143,6 +150,30 @@ in a blank session's composer.
   current selection reuse the snapshot for 8 seconds, and a repository whose
   work tree cannot be read is not retried for 30 seconds — that keeps an
   uninitialised submodule from spawning Git on every poll.
+- The panel's first frame is served from a **first-paint cache** rather than
+  from a fresh read (details in `docs/first-paint.md`). Two entries per workspace
+  seed it: the status page (10 minute seed TTL, LRU of four workspaces) and the
+  first history page (LRU of three repositories, no expiry). Both live in
+  `sessionStorage` under `dsh-git.paint.v1`, so a reload paints instantly too,
+  and both are written after every successful read, so the seed is the page the
+  user last saw. A seed only fills cold state — it can never roll back live data
+  — and every mount revalidates behind it (stale-while-revalidate).
+- A **first-paint prewarm** fills that cache shortly after the client boots: it
+  resolves the workspace the panel would open on (the remembered one, else the
+  first registered), runs exactly the reads the panel's first paint would run —
+  `status` for the whole workspace, a second `status` when the repository pick
+  leaves the primary one, then the first `graph` page — and writes them into the
+  same cache. Read routes only, once per boot, silent on failure, and idle when
+  both layers are already warm. It is deliberately not tied to sessions: this
+  panel follows the workspace switcher, not the active session's directory.
+- Opening the panel costs two round trips when nothing is cached: `status`
+  (discovery *and* the selected repository's full status, which the host returns
+  together) and `graph`. The bootstrap reuses that status response when its
+  repository pick lands on the same repository instead of asking twice; the host
+  runs the switcher summaries and the selected repository's status concurrently,
+  and the history read runs its log, its ref table and a cheap bare-check
+  concurrently instead of paying for a worktree status scan the history does not
+  use.
 - The panel is scoped to one repository at a time (as in Zed's Git panel); writes
   name their repository explicitly and are refused with `REPO_REQUIRED` rather
   than guessing when a workspace holds several repositories.
@@ -205,7 +236,13 @@ in a blank session's composer.
 - `docs/pill-popover.md` — the pill-trigger popover used by the workspace,
   repository, and branch switchers: full visual spec, states, variants, and a
   copy-paste checklist for reusing it in another panel.
+- `docs/first-paint.md` — how the panel paints before Git answers: cache schema,
+  seed TTLs and LRU sizes, the prewarm triggers, the two-round-trip first open,
+  and how to verify it by hand.
 - `test/host.test.mjs` — route-level checks over a throwaway fixture workspace
   that reproduces nested, ignored, worktree, bare, and enclosing repositories,
   plus branch creation and managed-worktree create/list/remove safety. Run with
-  `node test/host.test.mjs` (needs `git` on `PATH`).
+  `npm test` (needs `git` on `PATH`).
+- `test/client.test.mjs` — first-paint cache and prewarm-planner checks: the
+  Client half is evaluated in a Node VM with a stub browser around it, so the
+  seed/LRU/TTL rules and the prewarm read order are asserted without React.
