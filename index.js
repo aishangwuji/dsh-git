@@ -1193,7 +1193,20 @@ export function apply(ctx) {
     };
   }
 
-  /** Commit list with graph data; `limit`/`skip` page the history. */
+  /** One optional string filter, trimmed and bounded, or `` when absent. */
+  function graphFilterText(value, maxLength) {
+    if (typeof value !== 'string') return '';
+    const text = value.trim();
+    if (text === '' || text.includes('\0')) return '';
+    return text.slice(0, maxLength);
+  }
+
+  /**
+   * Commit list with graph data; `limit`/`skip` page the history and the
+   * optional `author` / `since` / `until` / `path` / `order` filters narrow it.
+   * Filtering happens in Git, not in the browser: a filtered history must page
+   * through the filtered set, and the client only ever holds one page.
+   */
   async function readGraph(workspacePath, repoValue, payload, signal) {
     const root = await operationRepo(workspacePath, repoValue, signal);
 
@@ -1202,11 +1215,28 @@ export function apply(ctx) {
     // The workbench history follows the checked-out branch; the explicit
     // Git-graph dialog asks for `all: true` when it wants every ref.
     const allRefs = payload && payload.all === true;
+    const author = graphFilterText(payload && payload.author, 200);
+    const since = graphFilterText(payload && payload.since, 64);
+    const until = graphFilterText(payload && payload.until, 64);
+    const pathFilter = graphFilterText(payload && payload.path, 4096)
+      ? safeRepoPath(root, graphFilterText(payload && payload.path, 4096))
+      : '';
+    const oldestFirst = Boolean(payload) && payload.order === 'oldest';
+
     const logArgs = [
       'log', '--topo-order', '--format=%H%x00%P%x00%an%x00%at%x00%s', '-n', String(limit + 1),
-      allRefs ? '--all' : 'HEAD',
     ];
+    // `--reverse` after `-n` gives the newest page in ascending order, which is
+    // what an "oldest first" toggle is supposed to show.
+    if (oldestFirst) logArgs.push('--reverse');
+    if (author) logArgs.push(`--author=${author}`);
+    if (since) logArgs.push(`--since=${since}`);
+    if (until) logArgs.push(`--until=${until}`);
+    logArgs.push(allRefs ? '--all' : 'HEAD');
     if (skip > 0) logArgs.push(`--skip=${skip}`);
+    // The path filter goes after `--` so a file named like a revision is never
+    // read as one.
+    if (pathFilter) logArgs.push('--', pathFilter);
     // The log, the ref table and the bare check are independent reads, so they
     // run together: the history page costs one Git round trip instead of three,
     // and the bare check is a cheap `rev-parse` rather than a full worktree

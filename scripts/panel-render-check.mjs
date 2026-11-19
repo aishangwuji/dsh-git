@@ -92,6 +92,7 @@ try {
     'dshg-file-row',              // changed files
     'dshg-pill-strong',           // branch pill
     'dshg-history-columns',       // commit column header
+    'dshg-history-filters',       // author / date / path / sort row
   ], 'seeded panel');
   if (seeded.includes('dshg-skeleton')) {
     throw new Error('seeded panel still shows the cold skeleton: the first frame ignored the paint cache');

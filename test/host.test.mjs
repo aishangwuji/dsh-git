@@ -361,6 +361,35 @@ async function main() {
     const alphaAfter = await ok({ op: 'status', workspace: fixture.workspace, repo: fixture.alpha });
     assert.equal(alphaAfter.counts.changed, 2, 'committing in beta leaves alpha untouched');
 
+    // 9b. History filters are applied by Git, so a filtered history pages
+    //     through the filtered set — and a path that escapes the repository is
+    //     refused before it ever reaches `git log`.
+    const byAuthor = await ok({
+      op: 'graph', workspace: fixture.workspace, repo: fixture.beta, author: 'Fixture',
+    });
+    assert.equal(byAuthor.commits.length, 2);
+    const noAuthor = await ok({
+      op: 'graph', workspace: fixture.workspace, repo: fixture.beta, author: 'nobody-matches',
+    });
+    assert.deepEqual(noAuthor.commits, []);
+    const secondOnly = await ok({
+      op: 'graph', workspace: fixture.workspace, repo: fixture.beta, path: 'second.txt',
+    });
+    assert.deepEqual(secondOnly.commits.map((commit) => commit.subject), ['beta second']);
+    const oldestFirst = await ok({
+      op: 'graph', workspace: fixture.workspace, repo: fixture.beta, order: 'oldest',
+    });
+    assert.deepEqual(oldestFirst.commits.map((commit) => commit.subject), ['beta root', 'beta second']);
+    // 2099 rather than 2999: git's approxidate treats absurd years as "now",
+    // which made a far-future boundary look like an ignored filter.
+    const future = await ok({
+      op: 'graph', workspace: fixture.workspace, repo: fixture.beta, since: '2099-01-01T00:00:00.000Z',
+    });
+    assert.deepEqual(future.commits, []);
+    await fail({
+      op: 'graph', workspace: fixture.workspace, repo: fixture.beta, path: '../escape.txt',
+    }, 'INVALID_PATH');
+
     // 10. Branches: local and remote lists, switching, and tracking checkout.
     const initialBranches = await ok({ op: 'branches', workspace: fixture.workspace, repo: fixture.target });
     assert.equal(initialBranches.current, 'main');

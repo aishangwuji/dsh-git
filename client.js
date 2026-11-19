@@ -85,6 +85,20 @@ window.__ModuleLoader__.load({
       graphEmptyDesc: '提交第一个更改后，提交图会显示在这里。',
       filterCommits: '筛选提交…',
       noMatchingCommits: '没有匹配的提交',
+      filterAuthor: '作者',
+      filterAuthorPlaceholder: '作者…',
+      filterPath: '路径',
+      filterPathPlaceholder: '路径过滤（回车）…',
+      filterDate: '时间',
+      filterDateAll: '全部时间',
+      filterDateToday: '今天',
+      filterDate7d: '近 7 天',
+      filterDate30d: '近 30 天',
+      filterDateYear: '今年',
+      sortNewest: '新 → 旧',
+      sortOldest: '旧 → 新',
+      filterClear: '清除筛选',
+      filterActive: '已筛选',
       commitColSubject: '描述',
       commitColTime: '日期',
       commitColAuthor: '作者',
@@ -319,6 +333,20 @@ window.__ModuleLoader__.load({
       graphEmptyDesc: 'The commit graph appears after your first commit.',
       filterCommits: 'Filter commits…',
       noMatchingCommits: 'No matching commits',
+      filterAuthor: 'Author',
+      filterAuthorPlaceholder: 'Author…',
+      filterPath: 'Path',
+      filterPathPlaceholder: 'Path filter (Enter)…',
+      filterDate: 'Date',
+      filterDateAll: 'All time',
+      filterDateToday: 'Today',
+      filterDate7d: 'Last 7 days',
+      filterDate30d: 'Last 30 days',
+      filterDateYear: 'This year',
+      sortNewest: 'Newest first',
+      sortOldest: 'Oldest first',
+      filterClear: 'Clear filters',
+      filterActive: 'Filtered',
       commitColSubject: 'Description',
       commitColTime: 'Date',
       commitColAuthor: 'Author',
@@ -783,6 +811,41 @@ window.__ModuleLoader__.load({
       } catch {
         // Some browsers reject custom types; plain text is enough.
       }
+    }
+
+    /* ------------------------------ history filters ------------------------------ */
+    /** The history pane's server-side filter state. Empty means "no filter". */
+    function defaultFilters() {
+      return { author: '', path: '', since: '', until: '', order: 'newest' };
+    }
+
+    function isDefaultFilters(filters) {
+      if (!filters) return true;
+      return !filters.author && !filters.path && !filters.since && !filters.until
+        && filters.order !== 'oldest';
+    }
+
+    /** `graph` request fragment: an absent filter is simply not sent. */
+    function graphRequest(filters) {
+      const payload = {};
+      if (!filters) return payload;
+      if (filters.author) payload.author = filters.author;
+      if (filters.path) payload.path = filters.path;
+      if (filters.since) payload.since = filters.since;
+      if (filters.until) payload.until = filters.until;
+      if (filters.order === 'oldest') payload.order = 'oldest';
+      return payload;
+    }
+
+    /** Local-midnight (or Jan 1) boundary for a date preset; '' means "all time". */
+    function sinceForPreset(key) {
+      const now = new Date();
+      const midnight = new Date(now.getFullYear(), now.getMonth(), now.getDate());
+      if (key === 'today') return midnight.toISOString();
+      if (key === '7d') return new Date(midnight.getTime() - 6 * 86400000).toISOString();
+      if (key === '30d') return new Date(midnight.getTime() - 29 * 86400000).toISOString();
+      if (key === 'year') return new Date(now.getFullYear(), 0, 1).toISOString();
+      return '';
     }
 
     function formatTime(timestamp) {
@@ -2948,8 +3011,21 @@ window.__ModuleLoader__.load({
     }
     function HistoryView({
       graph, graphLoading, graphHasMore, onLoadMore, selectedSha, onSelectCommit,
+      filters, onFilters,
     }) {
       const [query, setQuery] = useState('');
+      const [authorDraft, setAuthorDraft] = useState(filters.author || '');
+      const [pathDraft, setPathDraft] = useState(filters.path || '');
+      const [dateKey, setDateKey] = useState('all');
+
+      useEffect(() => { setAuthorDraft(filters.author || ''); }, [filters.author]);
+      useEffect(() => { setPathDraft(filters.path || ''); }, [filters.path]);
+
+      const filtered = !isDefaultFilters(filters);
+      const apply = useCallback((patch) => {
+        onFilters({ ...filters, ...patch });
+      }, [filters, onFilters]);
+
       const source = useMemo(() => {
         const list = graph || [];
         const needle = query.trim().toLowerCase();
@@ -2980,6 +3056,74 @@ window.__ModuleLoader__.load({
               'aria-label': t('filterCommits'),
               spellCheck: false,
             }))),
+        h('div', { className: 'dshg-history-filters' },
+          h('label', { className: 'dshg-filter' },
+            h('span', { className: 'dshg-filter-label' }, t('filterAuthor')),
+            h('input', {
+              className: 'dshg-filter-input',
+              value: authorDraft,
+              placeholder: t('filterAuthorPlaceholder'),
+              'aria-label': t('filterAuthor'),
+              spellCheck: false,
+              onChange: (event) => setAuthorDraft(event.target.value),
+              onKeyDown: (event) => {
+                if (event.key !== 'Enter') return;
+                event.preventDefault();
+                apply({ author: authorDraft.trim() });
+              },
+              onBlur: () => {
+                if ((filters.author || '') !== authorDraft.trim()) apply({ author: authorDraft.trim() });
+              },
+            })),
+          h('label', { className: 'dshg-filter' },
+            h('span', { className: 'dshg-filter-label' }, t('filterDate')),
+            h('select', {
+              className: 'dshg-filter-select',
+              value: dateKey,
+              'aria-label': t('filterDate'),
+              onChange: (event) => {
+                const key = event.target.value;
+                setDateKey(key);
+                apply({ since: sinceForPreset(key) });
+              },
+            }, [['all', t('filterDateAll')], ['today', t('filterDateToday')], ['7d', t('filterDate7d')],
+              ['30d', t('filterDate30d')], ['year', t('filterDateYear')]]
+              .map(([key, text]) => h('option', { key, value: key }, text)))),
+          h('label', { className: 'dshg-filter dshg-filter-grow' },
+            h('span', { className: 'dshg-filter-label' }, t('filterPath')),
+            h('input', {
+              className: 'dshg-filter-input',
+              value: pathDraft,
+              placeholder: t('filterPathPlaceholder'),
+              'aria-label': t('filterPath'),
+              spellCheck: false,
+              onChange: (event) => setPathDraft(event.target.value),
+              onKeyDown: (event) => {
+                if (event.key !== 'Enter') return;
+                event.preventDefault();
+                apply({ path: pathDraft.trim() });
+              },
+              onBlur: () => {
+                if ((filters.path || '') !== pathDraft.trim()) apply({ path: pathDraft.trim() });
+              },
+            })),
+          h('button', {
+            type: 'button',
+            className: 'dshg-filter-toggle',
+            title: t('filterDate'),
+            onClick: () => apply({ order: filters.order === 'oldest' ? 'newest' : 'oldest' }),
+          }, filters.order === 'oldest' ? t('sortOldest') : t('sortNewest')),
+          filtered ? h('button', {
+            type: 'button',
+            className: 'dshg-filter-clear',
+            title: t('filterClear'),
+            onClick: () => {
+              setAuthorDraft('');
+              setPathDraft('');
+              setDateKey('all');
+              onFilters(defaultFilters());
+            },
+          }, t('filterClear')) : null),
         h('div', {
           className: 'dshg-history-columns',
           style: { gridTemplateColumns: `${graphWidth}px minmax(0, 1fr) 92px 108px 72px` },
@@ -3291,6 +3435,7 @@ window.__ModuleLoader__.load({
       const [graphHasMore, setGraphHasMore] = useState(seed.graphHasMore);
       const [graphLoading, setGraphLoading] = useState(false);
       const [graphVersion, setGraphVersion] = useState(0);
+      const [filters, setFilters] = useState(defaultFilters);
       const [commitDetail, setCommitDetail] = useState(null);
       const [detailLoading, setDetailLoading] = useState(false);
       const [detailFile, setDetailFile] = useState(null);
@@ -3305,6 +3450,15 @@ window.__ModuleLoader__.load({
       const [resizing, setResizing] = useState(false);
       const [dialog, setDialog] = useState(null);
       const [worktreeBranches, setWorktreeBranches] = useState([]);
+
+      /**
+       * A history filter change is a new first page: the old paging cursor and
+       * the seeded default page no longer describe what should be on screen.
+       */
+      const changeFilters = useCallback((next) => {
+        setFilters(next);
+        setGraphVersion((value) => value + 1);
+      }, []);
 
       const applyStatus = useCallback((next) => {
         setStatus(next);
@@ -3397,21 +3551,32 @@ window.__ModuleLoader__.load({
         }
       }, []);
 
-      const loadGraph = useCallback(async (targetWorkspace, targetRepo) => {
+      const loadGraph = useCallback(async (targetWorkspace, targetRepo, targetFilters) => {
         if (!targetWorkspace || !targetRepo) return;
-        const next = await rpc('graph', { workspace: targetWorkspace, repo: targetRepo });
+        const next = await rpc('graph', {
+          workspace: targetWorkspace,
+          repo: targetRepo,
+          ...graphRequest(targetFilters),
+        });
         setGraph(next.commits || []);
         setGraphHasMore(Boolean(next.hasMore));
         // The history is the second half of the first screen: keep its first
-        // page warm so the next mount paints the middle pane too.
-        writePaintGraph(targetRepo, next);
+        // page warm so the next mount paints the middle pane too — but only the
+        // unfiltered page, because that is the page a fresh mount shows.
+        if (isDefaultFilters(targetFilters)) writePaintGraph(targetRepo, next);
       }, []);
 
       const loadMoreCommits = useCallback(async () => {
         if (!workspace || !repo || !graph) return;
         setGraphLoading(true);
         try {
-          const next = await rpc('graph', { workspace, repo, skip: graph.length, limit: 200 });
+          const next = await rpc('graph', {
+            workspace,
+            repo,
+            skip: graph.length,
+            limit: 200,
+            ...graphRequest(filters),
+          });
           setGraph((current) => {
             const seen = new Set((current || []).map((commit) => commit.sha));
             return [...(current || []), ...(next.commits || []).filter((commit) => !seen.has(commit.sha))];
@@ -3422,7 +3587,7 @@ window.__ModuleLoader__.load({
         } finally {
           setGraphLoading(false);
         }
-      }, [workspace, repo, graph]);
+      }, [workspace, repo, graph, filters]);
 
       const act = useCallback(async (label, operation) => {
         if (busyRef.current) return null;
@@ -3643,9 +3808,10 @@ window.__ModuleLoader__.load({
         // A seeded history page is already on screen: re-read it silently rather
         // than replacing it with a loading placeholder.
         const seed = seedRef.current;
-        const painted = Boolean(seed) && Boolean(seed.graph) && samePath(seed.repo, repo);
+        const painted = Boolean(seed) && Boolean(seed.graph) && samePath(seed.repo, repo)
+          && isDefaultFilters(filters);
         if (!painted) setGraphLoading(true);
-        loadGraph(workspace, repo).then(() => {
+        loadGraph(workspace, repo, filters).then(() => {
           if (alive) setGraphLoading(false);
         }).catch((error) => {
           if (!alive) return;
@@ -3653,7 +3819,7 @@ window.__ModuleLoader__.load({
           setToast({ kind: 'error', text: errorText(error), detail: error.detail || null });
         });
         return () => { alive = false; };
-      }, [workspace, repo, graphVersion, loadGraph]);
+      }, [workspace, repo, graphVersion, filters, loadGraph]);
 
       useEffect(() => {
         if (!toast) return;
@@ -4136,6 +4302,8 @@ window.__ModuleLoader__.load({
             onLoadMore: loadMoreCommits,
             selectedSha: commitDetail && commitDetail.sha,
             onSelectCommit: openCommit,
+            filters,
+            onFilters: changeFilters,
           })),
         h(PaneResizer, {
           side: 'right',
@@ -4669,6 +4837,38 @@ window.__ModuleLoader__.load({
       }
 
       /* History --------------------------------------------------------- */
+      /* Filter row: author / date preset / path / sort. Server-side filters
+         (the text search in the pane head filters the loaded page only). */
+      .dshg-history-filters {
+        display: flex; align-items: center; gap: 6px;
+        min-height: 30px; padding: 4px 12px;
+        flex: 0 0 auto; flex-wrap: wrap;
+        border-bottom: 1px solid var(--dsw-alias-border-l1, #e5e7eb);
+      }
+      .dshg-filter { display: inline-flex; align-items: center; gap: 4px; min-width: 0; }
+      .dshg-filter-grow { flex: 1 1 120px; }
+      .dshg-filter-label { color: var(--dsw-alias-label-tertiary, #6b7280); font-size: 10px; white-space: nowrap; }
+      .dshg-filter-input, .dshg-filter-select {
+        height: 22px; min-width: 0; padding: 0 7px;
+        border: 1px solid var(--dsw-alias-border-l1, #e5e7eb); border-radius: 999px;
+        background: var(--dsw-alias-bg-layer-1, #f4f5f7); color: inherit;
+        font: inherit; font-size: 11px; outline: none;
+      }
+      .dshg-filter-input { width: 96px; }
+      .dshg-filter-grow .dshg-filter-input { width: 100%; }
+      .dshg-filter-select { padding-right: 4px; cursor: pointer; }
+      .dshg-filter-input:focus, .dshg-filter-select:focus { border-color: var(--dsw-alias-state-business-primary, #4a8cff); }
+      .dshg-filter-toggle, .dshg-filter-clear {
+        height: 22px; padding: 0 8px;
+        border: 1px solid var(--dsw-alias-border-l1, #e5e7eb); border-radius: 999px;
+        background: transparent; color: var(--dsw-alias-label-secondary, #6b7280);
+        font: inherit; font-size: 10.5px; cursor: pointer; white-space: nowrap;
+      }
+      .dshg-filter-toggle:hover, .dshg-filter-clear:hover {
+        background: var(--dsw-alias-interactive-bg-hover, rgba(127,127,127,.10));
+        color: var(--dsw-alias-label-primary, inherit);
+      }
+      .dshg-filter-clear { color: var(--dsw-alias-state-business-primary, #4a8cff); }
       .dshg-history-columns {
         display: grid; align-items: center; gap: 8px;
         height: 26px; padding: 0 12px; flex: 0 0 auto;
