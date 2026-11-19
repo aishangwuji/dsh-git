@@ -99,6 +99,7 @@ window.__ModuleLoader__.load({
       sortOldest: '旧 → 新',
       filterClear: '清除筛选',
       filterActive: '已筛选',
+      styleAlert: '样式未加载（诊断）',
       commitColSubject: '描述',
       commitColTime: '日期',
       commitColAuthor: '作者',
@@ -347,6 +348,7 @@ window.__ModuleLoader__.load({
       sortOldest: 'Oldest first',
       filterClear: 'Clear filters',
       filterActive: 'Filtered',
+      styleAlert: 'Stylesheet not loaded (diagnostic)',
       commitColSubject: 'Description',
       commitColTime: 'Date',
       commitColAuthor: 'Author',
@@ -3455,6 +3457,11 @@ window.__ModuleLoader__.load({
        */
       const [seed] = useState(readBootSeed);
       const seedRef = useRef(seed);
+      /**
+       * `null` while the panel looks normal; when the stylesheet did not reach
+       * this panel, the diagnostic details that explain why.
+       */
+      const [styleState, setStyleState] = useState(null);
       /** The workspace whose page the mount effects must not clear (see below). */
       const lastWorkspaceRef = useRef(seed.status ? seed.workspace : null);
       /** Marks a status page fetched seconds ago, so mount does not re-read it. */
@@ -3764,14 +3771,40 @@ window.__ModuleLoader__.load({
         return () => clearTimeout(timer);
       }, []);
 
-      // A panel mounted inside a shadow root cannot see the document sheet, so
-      // the same rules are adopted on that root. No-op in the normal light DOM.
-      useEffect(() => {
+      /**
+       * Verify that the plugin stylesheet actually reached this panel, and
+       * repair what can be repaired: a shadow root cannot see the document
+       * sheet, and a document sheet may never have been adopted. When the rules
+       * still do not apply, the panel reports it with inline styles — the only
+       * styling that survives a refused stylesheet — plus the details that make
+       * the failure diagnosable from a screenshot.
+       */
+      useLayoutEffect(() => {
         const node = rootRef.current;
-        if (!node || typeof node.getRootNode !== 'function') return undefined;
-        const root = node.getRootNode();
-        if (root === document) return undefined;
-        return adoptStyles(root) || undefined;
+        if (!node) return;
+        adoptStyles(document);
+        const root = typeof node.getRootNode === 'function' ? node.getRootNode() : document;
+        if (root !== document) adoptStyles(root);
+        let active = false;
+        try {
+          active = getComputedStyle(node).getPropertyValue('--dshg-git-styled').trim() === '1';
+        } catch {
+          active = false;
+        }
+        if (active) return;
+        const element = document.querySelector('style[data-dsh-git-panel]');
+        const detail = {
+          element: element ? element.textContent.length : 0,
+          adopted: document.adoptedStyleSheets ? document.adoptedStyleSheets.length : -1,
+          sheet: STYLE_SHEET && STYLE_SHEET.cssRules ? STYLE_SHEET.cssRules.length : -1,
+          root: root === document ? 'document' : 'shadow',
+        };
+        setStyleState(detail);
+        try {
+          console.warn('[dsh-git] the panel stylesheet is not active', detail);
+        } catch {
+          // Logging must never replace the panel.
+        }
       }, []);
 
       useEffect(() => {
@@ -4216,6 +4249,21 @@ window.__ModuleLoader__.load({
         'aria-label': t('panel'),
         'aria-busy': busy ? 'true' : 'false',
       },
+      // Inline styles on purpose: if this banner is visible, a stylesheet was
+      // refused, so a class-based banner would be invisible too.
+      styleState ? h('div', {
+        role: 'status',
+        className: 'dshg-style-alert',
+        style: {
+          padding: '6px 10px',
+          background: '#fff4e5',
+          color: '#7a3e00',
+          borderBottom: '1px solid #f0c48a',
+          fontSize: '11px',
+          lineHeight: 1.5,
+          fontFamily: 'ui-monospace, monospace',
+        },
+      }, `${t('styleAlert')} · style=${styleState.element} adopted=${styleState.adopted} sheet=${styleState.sheet} root=${styleState.root}`) : null,
       h(PanelHeader, {
         workspaces,
         workspace,
@@ -4453,6 +4501,10 @@ window.__ModuleLoader__.load({
         font: inherit;
         font-size: 12px;
         outline: none;
+        /* Sentinel: the panel reads this back to prove these rules reached it.
+           A custom property only exists when THIS stylesheet is applied, so it
+           cannot be satisfied by the host's own theme. */
+        --dshg-git-styled: 1;
       }
       .dshg-root:focus-visible { outline: 2px solid var(--dsw-alias-state-business-primary, #4a8cff); outline-offset: -2px; }
       .dshg-root button:focus-visible,
