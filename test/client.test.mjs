@@ -371,6 +371,22 @@ test('branch names fold into folders for the branch tree', async () => {
   assert.equal(empty.leaves.length, 0);
 });
 
+test('the composer pill shows only the counters that are non-zero', async () => {
+  const { paint } = await loadClient();
+  // The list comes from the VM realm, so compare flat text, not object identity.
+  const text = (list) => [...list].map((item) => `${item.kind}:${item.text}`);
+  assert.deepEqual(text(paint.pillCounters(null)), []);
+  assert.deepEqual(text(paint.pillCounters({ counts: { changed: 0 }, ahead: 0, behind: 0 })), []);
+  assert.deepEqual(
+    text(paint.pillCounters({ counts: { changed: 3 }, ahead: 2, behind: 0 })),
+    ['changed:±3', 'ahead:↑2'],
+  );
+  assert.deepEqual(
+    text(paint.pillCounters({ counts: { changed: 0 }, ahead: 0, behind: 1 })),
+    ['behind:↓1'],
+  );
+});
+
 test('apply() registers the panel and schedules exactly one deferred prewarm', async () => {
   const workspaceList = [{ id: 'w1', title: 'demo', path: WORKSPACE }];
   // No test seam here: this is the module the loader actually receives.

@@ -848,6 +848,30 @@ window.__ModuleLoader__.load({
       return '';
     }
 
+    /**
+     * The composer pill's counters. Only non-zero values are emitted — a pill
+     * that always shows `±0 ↑0 ↓0` is noise, and the point of the counters is
+     * to say "something moved" at a glance.
+     */
+    function pillCounters(status) {
+      const counters = [];
+      if (!status) return counters;
+      const changed = status.counts ? Number(status.counts.changed) || 0 : 0;
+      if (changed > 0) counters.push({ kind: 'changed', text: `±${changed}` });
+      const ahead = Number(status.ahead) || 0;
+      if (ahead > 0) counters.push({ kind: 'ahead', text: `↑${ahead}` });
+      const behind = Number(status.behind) || 0;
+      if (behind > 0) counters.push({ kind: 'behind', text: `↓${behind}` });
+      return counters;
+    }
+
+    /** Class per counter kind: uncommitted = warn, ahead = push, behind = pull. */
+    const PILL_COUNTER_CLASS = {
+      changed: 'dshg-pill-changed',
+      ahead: 'dshg-ahead',
+      behind: 'dshg-behind',
+    };
+
     function formatTime(timestamp) {
       if (!timestamp) return '';
       try {
@@ -1936,8 +1960,16 @@ window.__ModuleLoader__.load({
         trigger: h(React.Fragment, null,
           h(IconBranch, { size: 13 }),
           h('strong', { className: 'dshg-pill-strong', 'data-dshg-tip': label }, label),
-          !hero && status.ahead > 0 ? h('span', { className: 'dshg-ahead' }, `↑${status.ahead}`) : null,
-          !hero && status.behind > 0 ? h('span', { className: 'dshg-behind' }, `↓${status.behind}`) : null),
+          // Status counters: uncommitted files, pull-behind, push-ahead. In the
+          // composer the pill is the only place that can say "this checkout
+          // moved" while the user is chatting, so the counters show there too.
+          pillCounters(status).map((counter) => h('span', {
+            key: counter.kind,
+            className: PILL_COUNTER_CLASS[counter.kind],
+            title: counter.kind === 'changed'
+              ? tf('filesChanged', { count: status.counts.changed })
+              : (counter.kind === 'ahead' ? t('push') : t('pull')),
+          }, counter.text))),
         onOpenChange: (open) => {
           if (!open) return;
           setQuery('');
@@ -2498,7 +2530,16 @@ window.__ModuleLoader__.load({
           if (document.visibilityState === 'visible') void refresh();
         };
         window.addEventListener('focus', onFocus);
-        return () => window.removeEventListener('focus', onFocus);
+        // A conversation can stay open for a long time, so poll slowly while the
+        // tab is visible: the pill is the only status readout in that surface.
+        const timer = setInterval(() => {
+          if (document.visibilityState === 'hidden') return;
+          void refresh();
+        }, 15000);
+        return () => {
+          window.removeEventListener('focus', onFocus);
+          clearInterval(timer);
+        };
       }, [active, refresh]);
 
       useEffect(() => {
@@ -4626,6 +4667,12 @@ window.__ModuleLoader__.load({
       .dshg-chip strong { color: var(--dsw-alias-label-primary, #111); font-weight: 600; overflow: hidden; text-overflow: ellipsis; }
       .dshg-ahead { color: var(--dshg-git-added); }
       .dshg-behind { color: var(--dshg-git-modified); }
+      /* Uncommitted-file counter on the branch pill: amber, the same tone the
+         changes tree uses for a modified file. */
+      .dshg-pill-changed { color: var(--dshg-git-modified); font-weight: 600; }
+      .dshg-pillselect-hero .dshg-pill-changed,
+      .dshg-pillselect-hero .dshg-ahead,
+      .dshg-pillselect-hero .dshg-behind { font-size: 10.5px; font-weight: 600; }
       .dshg-muted { color: var(--dsw-alias-label-tertiary, #6b7280); font-size: 11px; }
 
       /* Pill buttons ---------------------------------------------------- */
@@ -5942,6 +5989,7 @@ window.__ModuleLoader__.load({
         writePaintWorkspaces,
         pickBootstrapRepo,
         branchFolders,
+        pillCounters,
         schedulePrewarm,
         resetPrewarm() {
           if (prewarmTimer !== null) {
