@@ -24,6 +24,23 @@ const ROOT = join(dirname(fileURLToPath(import.meta.url)), '..');
 const read = (name) => readFile(join(ROOT, name), 'utf8');
 
 const HOST = await read('index.js');
+const HOST_FILES = [
+  'index.js',
+  'host/runtime.js',
+  'host/core.js',
+  'host/git.js',
+  'host/state.js',
+  'host/discovery.js',
+  'host/status.js',
+  'host/history.js',
+  'host/write.js',
+  'host/worktrees.js',
+  'host/route.js',
+];
+/** Every host source, for rules that are not about one particular file. */
+const HOST_SOURCES = new Map();
+for (const file of HOST_FILES) HOST_SOURCES.set(file, await read(file));
+const HOST_ANY = [...HOST_SOURCES.values()].join('\n');
 const CLIENT = await read('client.js');
 const STYLES = await read('styles.css');
 const PKG = JSON.parse(await read('package.json'));
@@ -51,8 +68,8 @@ function dispatchedOps() {
 }
 
 const WRITE_OPS = (() => {
-  const match = /const WRITE_OPS = new Set\(\[([\s\S]*?)\]\);/.exec(HOST);
-  assert.ok(match, 'index.js no longer declares WRITE_OPS');
+  const match = /const WRITE_OPS = new Set\(\[([\s\S]*?)\]\);/.exec(HOST_ANY);
+  assert.ok(match, 'the host no longer declares WRITE_OPS');
   return new Set([...match[1].matchAll(/'([^']+)'/g)].map((item) => item[1]));
 })();
 
@@ -67,19 +84,23 @@ test('the client half is a no-build module that only requires the host baseline'
 });
 
 test('the host half imports only Node builtins and its own modules', () => {
-  const specifiers = [...HOST.matchAll(/^import\s[^'"]*['"]([^'"]+)['"]/gm)].map((match) => match[1]);
-  assert.ok(specifiers.length > 0, 'index.js lost its imports entirely');
-  for (const specifier of specifiers) {
-    const local = specifier.startsWith('./') || specifier.startsWith('../');
-    assert.ok(local || specifier.startsWith('node:'), `index.js imports "${specifier}", which is neither a builtin nor a relative module`);
+  let total = 0;
+  for (const [file, text] of HOST_SOURCES) {
+    const specifiers = [...text.matchAll(/^import\s[^'"]*['"]([^'"]+)['"]/gm)].map((match) => match[1]);
+    total += specifiers.length;
+    for (const specifier of specifiers) {
+      const local = specifier.startsWith('./') || specifier.startsWith('../');
+      assert.ok(local || specifier.startsWith('node:'), `${file} imports "${specifier}", which is neither a builtin nor a relative module`);
+    }
   }
+  assert.ok(total > 0, 'the host lost its imports entirely');
 });
 
 test('git is always spawned argv-only', () => {
-  assert.doesNotMatch(HOST, /shell:\s*true/, 'a shell-spawned command would break the argv-only rule');
-  assert.doesNotMatch(HOST, /(^|[^.\w])exec(Sync)?\(/m, 'exec/execSync build a command string; use the argv spawn');
-  assert.doesNotMatch(HOST, /from ['"]child_process['"]/, 'git goes through the Host subprocess service');
-  assert.match(HOST, /async function runGit\(/, 'the single argv-only git entry point is missing');
+  assert.doesNotMatch(HOST_ANY, /shell:\s*true/, 'a shell-spawned command would break the argv-only rule');
+  assert.doesNotMatch(HOST_ANY, /(^|[^.\w])exec(Sync)?\(/m, 'exec/execSync build a command string; use the argv spawn');
+  assert.doesNotMatch(HOST_ANY, /from ['"]child_process['"]/, 'git goes through the Host subprocess service');
+  assert.match(HOST_ANY, /async function runGit\(/, 'the single argv-only git entry point is missing');
 });
 
 test('every dispatched operation is either read-only or inside the write lock', () => {
@@ -99,13 +120,13 @@ test('every dispatched operation is either read-only or inside the write lock', 
 });
 
 test('destructive operations refuse to run without an explicit confirmation', () => {
-  assert.match(HOST, /function requireConfirm\(body, action\)/, 'the confirmation guard is missing');
-  assert.match(HOST, /throw new GitError\('CONFIRM_REQUIRED'/, 'the guard must fail with CONFIRM_REQUIRED');
+  assert.match(HOST_ANY, /function requireConfirm\(body, action\)/, 'the confirmation guard is missing');
+  assert.match(HOST_ANY, /throw new GitError\('CONFIRM_REQUIRED'/, 'the guard must fail with CONFIRM_REQUIRED');
   // Worktree removal is the destructive operation this version ships: `--force`
   // deletes uncommitted files, `deleteBranch` force-deletes a branch.
-  const removeStart = HOST.indexOf('async function removeWorktree(');
+  const removeStart = HOST_ANY.indexOf('async function removeWorktree(');
   assert.notEqual(removeStart, -1);
-  const removeBody = HOST.slice(removeStart, HOST.indexOf('\n  }', removeStart));
+  const removeBody = HOST_ANY.slice(removeStart, HOST_ANY.indexOf('\n}', removeStart));
   assert.match(removeBody, /requireConfirm\(payload, 'worktree-remove'\)/, 'worktree-remove must confirm before force/delete-branch');
   // The client must keep sending that record for its own destructive paths.
   assert.match(CLIENT, /confirm: force \|\| deleteBranch/, 'the client must forward the explicit confirmation');
@@ -120,9 +141,22 @@ test('the panel stylesheet is a real file, not a literal inside the bundle', () 
   assert.match(STYLES, /--dshg-git-styled:\s*1;/, 'the self-check sentinel must be part of the stylesheet');
   assert.doesNotMatch(CLIENT, /const CSS_TEXT = `/, 'the stylesheet must not return to the client bundle as a template literal');
   assert.match(CLIENT, /const STYLE_URL = '\/dsh-git-6b1e\/styles\.css'/, 'the client must fetch the stylesheet from the plugin route');
-  assert.match(HOST, /const STYLE_FILE = join\(/, 'the host must know where styles.css lives');
-  assert.match(HOST, /content-type': 'text\/css; charset=utf-8'/, 'the host must serve the stylesheet as CSS');
+  assert.match(HOST_ANY, /const STYLE_FILE = join\(/, 'the host must know where styles.css lives');
+  assert.match(HOST_ANY, /content-type': 'text\/css; charset=utf-8'/, 'the host must serve the stylesheet as CSS');
   assert.ok(PKG.files.includes('styles.css'), 'styles.css must ship in the package');
+});
+
+test('the host stays split into domain modules instead of one god file', () => {
+  for (const file of HOST_FILES) {
+    assert.ok(HOST_SOURCES.get(file).length > 0, `${file} is missing`);
+  }
+  const indexLines = HOST.split('\n').length;
+  assert.ok(indexLines < 400, `index.js is ${indexLines} lines; domain logic belongs in host/*.js`);
+  for (const [file, text] of HOST_SOURCES) {
+    const count = text.split('\n').length;
+    assert.ok(count <= 600, `${file} is ${count} lines; split it by domain instead of growing a god file`);
+  }
+  assert.match(PKG.files.join('\n'), /host\/\*\.js/, 'the split host modules must ship in the package');
 });
 
 test('the package manifest still describes the bundle the loader needs', () => {
@@ -142,6 +176,7 @@ test('CI runs every suite and syntax-checks both halves', () => {
   assert.match(CI, /node --test test\/host\.test\.mjs test\/client\.test\.mjs test\/invariants\.test\.mjs/, 'CI must run all three suites');
   assert.match(CI, /node --check index\.js/, 'CI must syntax-check the host half');
   assert.match(CI, /node --check client\.js/, 'CI must syntax-check the client half');
+  assert.match(CI, /for file in host\/\*\.js/, 'CI must syntax-check the split host modules');
 });
 
 test('the two locales declare exactly the same keys', () => {

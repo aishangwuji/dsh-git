@@ -271,7 +271,22 @@ in a blank session's composer.
 
 ## Files
 
-- `index.js` — host route, repository discovery, and all Git operations.
+- `index.js` — the thin host entry: plugin row (`inject`), `apply()`, the HTTP
+  route (including `GET /styles.css`), and the operation switch. Everything the
+  switch calls lives in `host/`.
+- `host/core.js` — errors, limits, and the only path/ref validators.
+- `host/git.js` — the single argv-only `git` entry point, executable resolution,
+  and the environment Git runs with.
+- `host/state.js` — short-lived caches, the per-repository write queue, and the
+  destructive-operation `confirm` guard.
+- `host/discovery.js` — workspace allow-list and repository discovery.
+- `host/status.js` — status snapshots, counts, auxiliary reads, status pages.
+- `host/history.js` — filtered commit graph, commit details, diffs, branch tree.
+- `host/write.js` — stage/commit/checkout/branch/fetch/pull/push/init.
+- `host/worktrees.js` — managed worktrees: layout, listing, create/remove.
+- `host/route.js` — same-origin fence, bounded body reads, JSON responses.
+- `host/runtime.js` — the Cordis context and logger the helpers read instead of
+  closing over `apply()`.
 - `client.js` — React view registered into `main` and `sidebar.panellist`.
 - `styles.css` — the panel stylesheet, served by the plugin route at
   `/dsh-git-6b1e/styles.css` and adopted by the client as a constructable
