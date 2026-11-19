@@ -3764,6 +3764,16 @@ window.__ModuleLoader__.load({
         return () => clearTimeout(timer);
       }, []);
 
+      // A panel mounted inside a shadow root cannot see the document sheet, so
+      // the same rules are adopted on that root. No-op in the normal light DOM.
+      useEffect(() => {
+        const node = rootRef.current;
+        if (!node || typeof node.getRootNode !== 'function') return undefined;
+        const root = node.getRootNode();
+        if (root === document) return undefined;
+        return adoptStyles(root) || undefined;
+      }, []);
+
       useEffect(() => {
         if (!workspace) return;
         // Only a real workspace switch resets the panel. The workspace that was
@@ -5399,6 +5409,45 @@ window.__ModuleLoader__.load({
     `;
 
     /* ------------------------------------------------------------------ *
+     * Stylesheet installation
+     *
+     * A `<style>` element in `document.head` is the obvious way to ship these
+     * rules, but it is also the fragile way: a page policy can refuse inline
+     * style elements (React's `style` attributes keep working, so the page
+     * still renders — just unstyled), and any code that removes the element
+     * takes every rule with it.
+     *
+     * A constructable stylesheet avoids both: it is adopted on the document
+     * instead of living as an element, so there is nothing to refuse and
+     * nothing to remove. It is installed unconditionally, with the `<style>`
+     * element kept as the fallback for engines without `adoptedStyleSheets`
+     * (and as the place DevTools shows the sheet).
+     * ------------------------------------------------------------------ */
+    const STYLE_SHEET = (() => {
+      try {
+        const sheet = new CSSStyleSheet();
+        sheet.replaceSync(CSS_TEXT);
+        return sheet;
+      } catch {
+        // Older engines, or a document without constructable stylesheets.
+        return null;
+      }
+    })();
+
+    /** Adopt the plugin sheet on a document or shadow root; returns an undo. */
+    function adoptStyles(root) {
+      if (!root || STYLE_SHEET === null) return null;
+      if (!('adoptedStyleSheets' in root)) return null;
+      const current = Array.from(root.adoptedStyleSheets || []);
+      if (current.includes(STYLE_SHEET)) return () => {};
+      root.adoptedStyleSheets = [...current, STYLE_SHEET];
+      return () => {
+        root.adoptedStyleSheets = Array.from(root.adoptedStyleSheets || [])
+          .filter((sheet) => sheet !== STYLE_SHEET);
+      };
+    }
+
+    /* ------------------------------------------------------------------ *
      * Workspace tree decorations
      *
      * The right Sidebar's files tab renders `li[data-files-entry][data-files-path]`
@@ -5823,13 +5872,36 @@ window.__ModuleLoader__.load({
 
     function apply(ctx) {
       ctx.effect(() => {
+        const undo = [];
+        const adopted = adoptStyles(document);
+        if (adopted) undo.push(adopted);
+
         const style = document.createElement('style');
         style.dataset.dshGitPanel = 'styles';
         style.textContent = CSS_TEXT;
-        const styleHost = document.head || document.documentElement;
-        if (!styleHost) return () => {};
-        styleHost.appendChild(style);
-        return () => style.remove();
+        const attach = () => {
+          const host = document.head || document.documentElement;
+          if (!host) return false;
+          if (style.isConnected !== true) host.appendChild(style);
+          return true;
+        };
+        if (!attach()) {
+          // Applied before the document had a head: finish installing as soon
+          // as the parser gives us one, instead of styling nothing forever.
+          const retry = () => {
+            document.removeEventListener('DOMContentLoaded', retry);
+            attach();
+          };
+          document.addEventListener('DOMContentLoaded', retry);
+          undo.push(() => document.removeEventListener('DOMContentLoaded', retry));
+        }
+        if (adopted === null && style.sheet === null) {
+          // Neither path worked: say so once, so an unstyled panel is
+          // diagnosable from the console instead of from guesswork.
+          console.warn('[dsh-git] the panel stylesheet could not be installed: inline style elements are refused and constructable stylesheets are unavailable');
+        }
+        undo.push(() => style.remove());
+        return () => { for (const dispose of undo) dispose(); };
       }, 'dsh-git: styles');
       ctx.effect(() => ctx.locale.register(NS, { zh, en }), 'dsh-git: dictionaries');
       t = ctx.locale.bind(NS);
