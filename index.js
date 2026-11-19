@@ -1103,15 +1103,35 @@ export function apply(ctx) {
       : findRepository(workspaceRoot, repos, repoValue);
     if (!selected) throw new GitError('REPO_NOT_FOUND', '该仓库不在当前工作区内');
 
-    const results = await readWorkspaceRepositories(repos, signal, selected.root);
+    // The switcher summaries and the selected repository's full status are two
+    // independent reads that share one `git status` for the selected repository
+    // (deduplicated inside `readRepoSnapshot`). Running them together saves a
+    // whole Git spawn of latency on the panel's first screen.
+    const statusPromise = readRepoStatus(selected.root, signal).then(
+      (value) => ({ value }),
+      (error) => ({ error }),
+    );
+    const [results, statusOutcome] = await Promise.all([
+      readWorkspaceRepositories(repos, signal, selected.root),
+      statusPromise,
+    ]);
     const summaries = results.map(({ repo, snapshot, error }) => summarizeRepository(repo, snapshot, error));
     const current = results.find((item) => item.repo.root === selected.root);
+    if (statusOutcome.error) {
+      if (statusOutcome.error instanceof GitError && statusOutcome.error.code === 'CANCELLED') {
+        throw statusOutcome.error;
+      }
+      const detail = statusOutcome.error instanceof GitError
+        ? statusOutcome.error.code
+        : (statusOutcome.error && statusOutcome.error.message) || null;
+      throw new GitError('STATUS_FAILED', '读取 Git 状态失败', detail);
+    }
     if (!current || !current.snapshot) {
       if (current && current.error === 'CANCELLED') throw new GitError('CANCELLED', '操作已取消');
       throw new GitError('STATUS_FAILED', '读取 Git 状态失败', current ? current.error : null);
     }
 
-    const snapshot = await readRepoStatus(selected.root, signal);
+    const snapshot = statusOutcome.value;
     const primary = primaryRepository(repos);
     return {
       isRepo: true,
@@ -1128,8 +1148,6 @@ export function apply(ctx) {
   /** Commit list with graph data; `limit`/`skip` page the history. */
   async function readGraph(workspacePath, repoValue, payload, signal) {
     const root = await operationRepo(workspacePath, repoValue, signal);
-    const snapshot = await readRepoSnapshot(root, signal);
-    if (snapshot.isBare) return { commits: [], hasMore: false };
 
     const limit = Math.min(Math.max(Number(payload && payload.limit) || 200, 1), 500);
     const skip = Math.max(Number(payload && payload.skip) || 0, 0);
@@ -1141,8 +1159,23 @@ export function apply(ctx) {
       allRefs ? '--all' : 'HEAD',
     ];
     if (skip > 0) logArgs.push(`--skip=${skip}`);
-    const log = await runGit(root, logArgs, { signal, timeoutMs: 30_000 });
+    // The log, the ref table and the bare check are independent reads, so they
+    // run together: the history page costs one Git round trip instead of three,
+    // and the bare check is a cheap `rev-parse` rather than a full worktree
+    // status scan the history never uses.
+    const [log, refsResult, bare] = await Promise.all([
+      runGit(root, logArgs, { signal, timeoutMs: 30_000 }),
+      // Refs are read for the visible page only; `skip` pages are appended by
+      // the client, so a later page still carries its own refs.
+      runGit(root, [
+        'for-each-ref', '--format=%(objectname)%00%(refname)%00%(HEAD)',
+        'refs/heads', 'refs/remotes', 'refs/tags',
+      ], { signal, timeoutMs: 15_000 }),
+      runGit(root, ['rev-parse', '--is-bare-repository'], { signal, timeoutMs: 10_000 }),
+    ]);
 
+    // A bare checkout has no work tree and the panel shows no history for it.
+    if (bare.code === 0 && bare.stdout.trim() === 'true') return { commits: [], hasMore: false };
     if (log.code !== 0) return { commits: [], hasMore: false };
 
     const commits = [];
@@ -1163,13 +1196,6 @@ export function apply(ctx) {
 
     const hasMore = commits.length > limit;
     if (hasMore) commits.length = limit;
-
-    // Refs are read for the visible page only; `skip` pages are appended by the
-    // client, so a later page still carries its own refs.
-    const refsResult = await runGit(root, [
-      'for-each-ref', '--format=%(objectname)%00%(refname)%00%(HEAD)',
-      'refs/heads', 'refs/remotes', 'refs/tags',
-    ], { signal, timeoutMs: 15_000 });
 
     if (refsResult.code === 0) {
       const refsBySha = new Map();
