@@ -1,8 +1,9 @@
 import { createHash } from 'node:crypto';
 import { existsSync } from 'node:fs';
-import { mkdir, readdir, stat } from 'node:fs/promises';
+import { mkdir, readdir, readFile, stat } from 'node:fs/promises';
 import { homedir } from 'node:os';
 import { basename, dirname, join, relative, resolve, sep } from 'node:path';
+import { fileURLToPath } from 'node:url';
 
 /**
  * Host half of the Git workbench.
@@ -14,6 +15,8 @@ import { basename, dirname, join, relative, resolve, sep } from 'node:path';
  */
 
 const ROUTE_PREFIX = '/dsh-git-6b1e';
+/** The panel stylesheet, served next to the RPC route as real CSS text. */
+const STYLE_FILE = join(dirname(fileURLToPath(import.meta.url)), 'styles.css');
 const MAX_BODY = 1024 * 1024;
 const MAX_OUTPUT = 4 * 1024 * 1024;
 const STATUS_TIMEOUT = 30_000;
@@ -2076,11 +2079,6 @@ export function apply(ctx) {
     path: ROUTE_PREFIX,
     handler: async (req, res) => {
       try {
-        if (req.method !== 'POST') {
-          sendJson(res, 405, { ok: false, error: { code: 'METHOD_NOT_ALLOWED', message: '仅支持 POST' } });
-          return;
-        }
-
         let expectedOrigin = null;
         try {
           expectedOrigin = ctx.webServer.getOrigin();
@@ -2089,6 +2087,41 @@ export function apply(ctx) {
         }
         if (!sameOrigin(req.headers.origin, expectedOrigin)) {
           sendJson(res, 403, { ok: false, error: { code: 'ORIGIN_REJECTED', message: '请求来源不被允许' } });
+          return;
+        }
+
+        const pathname = new URL(req.url === undefined ? '/' : req.url, 'http://dsh.internal').pathname;
+        if (pathname === `${ROUTE_PREFIX}/styles.css`) {
+          // The panel stylesheet travels as a real file instead of a template
+          // literal inside the client bundle: text a browser fetches cannot be
+          // rewritten or dropped by whatever transforms the bundle on its way
+          // to the page.
+          if (req.method !== 'GET' && req.method !== 'HEAD') {
+            sendJson(res, 405, { ok: false, error: { code: 'METHOD_NOT_ALLOWED', message: '仅支持 GET' } });
+            return;
+          }
+          let css = null;
+          try {
+            css = await readFile(STYLE_FILE, 'utf8');
+          } catch (error) {
+            logger?.warn?.('[dsh-git] styles.css is missing', error);
+          }
+          if (css === null) {
+            sendJson(res, 404, { ok: false, error: { code: 'STYLESHEET_MISSING', message: '样式表文件缺失' } });
+            return;
+          }
+          const text = req.method === 'HEAD' ? '' : css;
+          res.writeHead(200, {
+            'content-type': 'text/css; charset=utf-8',
+            'cache-control': 'no-cache',
+            'content-length': Buffer.byteLength(text),
+          });
+          res.end(text);
+          return;
+        }
+
+        if (req.method !== 'POST') {
+          sendJson(res, 405, { ok: false, error: { code: 'METHOD_NOT_ALLOWED', message: '仅支持 POST' } });
           return;
         }
 

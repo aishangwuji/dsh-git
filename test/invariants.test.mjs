@@ -25,6 +25,7 @@ const read = (name) => readFile(join(ROOT, name), 'utf8');
 
 const HOST = await read('index.js');
 const CLIENT = await read('client.js');
+const STYLES = await read('styles.css');
 const PKG = JSON.parse(await read('package.json'));
 const CI = await read('.github/workflows/ci.yml');
 
@@ -108,6 +109,20 @@ test('destructive operations refuse to run without an explicit confirmation', ()
   assert.match(removeBody, /requireConfirm\(payload, 'worktree-remove'\)/, 'worktree-remove must confirm before force/delete-branch');
   // The client must keep sending that record for its own destructive paths.
   assert.match(CLIENT, /confirm: force \|\| deleteBranch/, 'the client must forward the explicit confirmation');
+});
+
+test('the panel stylesheet is a real file, not a literal inside the bundle', () => {
+  // A 60 KB template literal in the client bundle can be emptied by a transform
+  // on the way to the page — the panel then works with no styles at all. The
+  // rules therefore live in a stylesheet the browser fetches.
+  assert.ok(STYLES.length > 20_000, `styles.css looks truncated: ${STYLES.length} bytes`);
+  assert.match(STYLES, /\.dshg-root\s*\{/, 'styles.css must carry the panel root rule');
+  assert.match(STYLES, /--dshg-git-styled:\s*1;/, 'the self-check sentinel must be part of the stylesheet');
+  assert.doesNotMatch(CLIENT, /const CSS_TEXT = `/, 'the stylesheet must not return to the client bundle as a template literal');
+  assert.match(CLIENT, /const STYLE_URL = '\/dsh-git-6b1e\/styles\.css'/, 'the client must fetch the stylesheet from the plugin route');
+  assert.match(HOST, /const STYLE_FILE = join\(/, 'the host must know where styles.css lives');
+  assert.match(HOST, /content-type': 'text\/css; charset=utf-8'/, 'the host must serve the stylesheet as CSS');
+  assert.ok(PKG.files.includes('styles.css'), 'styles.css must ship in the package');
 });
 
 test('the package manifest still describes the bundle the loader needs', () => {

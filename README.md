@@ -142,7 +142,13 @@ in a blank session's composer.
 
 - The browser never runs Git. A same-origin host route (`/dsh-git-6b1e`) accepts
   JSON requests, validates the workspace against the Harness workspace registry,
-  and spawns Git with an argv array only (no shell).
+  and spawns Git with an argv array only (no shell). The same prefix serves the
+  panel stylesheet as CSS text (`GET /dsh-git-6b1e/styles.css`), behind the same
+  origin fence; the client fetches it and adopts it as a constructable
+  stylesheet, with a `<link>` to that URL as the fallback. The panel self-checks
+  the result (a sentinel custom property) and shows an inline-styled diagnostic
+  row with the numbers that explain a failure, because an unstyled panel that
+  still works is otherwise invisible to the console.
 - Repository discovery follows Zed's worktree scan (`crates/worktree/src/worktree.rs`,
   `insert_git_repository`): a directory that contains a `.git` entry *is* a
   repository, `.git` internals are never walked, and a repository nested inside
@@ -267,6 +273,11 @@ in a blank session's composer.
 
 - `index.js` — host route, repository discovery, and all Git operations.
 - `client.js` — React view registered into `main` and `sidebar.panellist`.
+- `styles.css` — the panel stylesheet, served by the plugin route at
+  `/dsh-git-6b1e/styles.css` and adopted by the client as a constructable
+  stylesheet. It is a real file rather than a template literal in the bundle: a
+  literal can be dropped or rewritten by whatever transforms the bundle on its
+  way to the page, which leaves a fully working panel with no styles at all.
 - `cordis.patch.yml` — inserts the host plugin row.
 - `locale/*.json`, `icon.svg` — plugin manager metadata and artwork.
 - `docs/pill-popover.md` — the pill-trigger popover used by the workspace,

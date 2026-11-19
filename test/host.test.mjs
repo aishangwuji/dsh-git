@@ -223,6 +223,16 @@ async function main() {
   await new Promise((resolve) => server.listen(0, '127.0.0.1', resolve));
   const { port } = server.address();
 
+  // The panel stylesheet travels as real CSS text over the same prefix, not
+  // inside the client bundle (a bundled literal can be dropped by whatever
+  // transforms the bundle, which leaves a working panel with no styles).
+  const stylesheet = await fetch(`http://127.0.0.1:${port}${ROUTE.replace(/\/rpc$/, '/styles.css')}`);
+  assert.equal(stylesheet.status, 200, 'the stylesheet route answers GET');
+  assert.match(stylesheet.headers.get('content-type') ?? '', /text\/css/);
+  const css = await stylesheet.text();
+  assert.ok(css.includes('.dshg-root'), 'the served stylesheet carries the panel rules');
+  assert.ok(css.includes('--dshg-git-styled: 1'), 'the served stylesheet carries the self-check sentinel');
+
   const rpc = async (payload) => {
     const response = await fetch(`http://127.0.0.1:${port}${ROUTE}`, {
       method: 'POST',
