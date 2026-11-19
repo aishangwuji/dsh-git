@@ -502,6 +502,54 @@ export function apply(ctx) {
     discoveryCache.delete(cacheKey(workspacePath));
   }
 
+  /* ------------------------------------------------------------------ *
+   * Write serialization and destructive-operation guards
+   *
+   * Two panel instances can be open at once (the main Git tab and the sidebar
+   * seat), and the client's own `busy` flag only covers one of them, so writes
+   * are serialized here — per repository — and the same checkout never runs two
+   * `git` writes concurrently. The queue is a promise chain per lock key whose
+   * tail never rejects, so one failed write cannot poison the next waiter.
+   *
+   * Destructive operations additionally require `confirm: true` from the
+   * caller. The UI is expected to have asked the user first; the flag is the
+   * record that it did, so a stale panel or a code path that forgot the dialog
+   * cannot silently delete a branch or wipe a dirty worktree.
+   * ------------------------------------------------------------------ */
+
+  const WRITE_OPS = new Set([
+    'stage', 'unstage', 'commit', 'checkout', 'create-branch',
+    'worktree-add', 'worktree-remove', 'init', 'fetch', 'pull', 'push',
+  ]);
+  const writeQueues = new Map();
+
+  /** The repository a write targets, as a lock key (falls back to the workspace). */
+  function lockKeyOf(workspacePath, repoValue) {
+    const workspaceRoot = resolve(workspacePath);
+    const target = repoValue == null || repoValue === ''
+      ? workspaceRoot
+      : resolve(workspaceRoot, String(repoValue));
+    return cacheKey(target);
+  }
+
+  /** Run `run` after every earlier write for the same key has settled. */
+  function withRepoLock(key, run) {
+    const previous = writeQueues.get(key) || Promise.resolve();
+    const next = previous.then(run, run);
+    const tail = next.then(() => {}, () => {});
+    writeQueues.set(key, tail);
+    tail.then(() => {
+      if (writeQueues.get(key) === tail) writeQueues.delete(key);
+    });
+    return next;
+  }
+
+  /** Refuse a destructive operation unless the caller confirmed it. */
+  function requireConfirm(body, action) {
+    if (body && body.confirm === true) return;
+    throw new GitError('CONFIRM_REQUIRED', `需要确认后才能执行：${action}`, action);
+  }
+
   function emptyCounts() {
     return { changed: 0, staged: 0, unstaged: 0, conflicts: 0, untracked: 0 };
   }
@@ -1837,7 +1885,12 @@ export function apply(ctx) {
       throw new GitError('WORKTREE_NOT_MANAGED', '只能移除由面板托管的 worktree', entry.path);
     }
 
+    // Removing a checkout with `--force` deletes uncommitted files, and
+    // `deleteBranch` force-deletes a branch: both lose data that Git cannot
+    // recover, so they need the caller's explicit confirmation.
     const force = payload.force === true;
+    if (force || payload.deleteBranch === true) requireConfirm(payload, 'worktree-remove');
+
     if (!force) {
       const dirty = await runGit(entry.path, [
         'status', '--porcelain=v1', '-z', '--untracked-files=all', '--', '.',
@@ -1887,7 +1940,15 @@ export function apply(ctx) {
     }
 
     const workspace = requireWorkspace(body.workspace);
+    if (WRITE_OPS.has(op)) {
+      // One write at a time per repository, whatever panel sent it.
+      return withRepoLock(lockKeyOf(workspace, body.repo), () => runOperation(op, workspace, body, signal));
+    }
+    return runOperation(op, workspace, body, signal);
+  }
 
+  /** The operation switch; write operations arrive here already holding the lock. */
+  async function runOperation(op, workspace, body, signal) {
     switch (op) {
       case 'status':
         return readStatus(workspace, body.repo, signal);

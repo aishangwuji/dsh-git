@@ -186,6 +186,7 @@ window.__ModuleLoader__.load({
       statusCleanDesc: '没有需要提交的更改。',
       overviewTitle: '仓库概览',
       branchLabel: '分支',
+      repos: '仓库',
       latestCommit: '最近提交',
       kindAdded: '新增',
       kindModified: '修改',
@@ -413,6 +414,7 @@ window.__ModuleLoader__.load({
       statusCleanDesc: 'Nothing to commit.',
       overviewTitle: 'Repository overview',
       branchLabel: 'Branch',
+      repos: 'Repositories',
       latestCommit: 'Latest commit',
       kindAdded: 'Added',
       kindModified: 'Modified',
@@ -1146,6 +1148,10 @@ window.__ModuleLoader__.load({
               path: created.path,
               force: true,
               deleteBranch: true,
+              // This is our own just-created checkout being rolled back, not a
+              // user action: the confirmation it would otherwise need is the
+              // failure that triggered the rollback.
+              confirm: true,
             });
           } catch {
             // The original failure is what the caller reports.
@@ -1157,12 +1163,19 @@ window.__ModuleLoader__.load({
 
     /** Remove a managed worktree and, when linked, its workspace registration. */
     async function removeWorktreeSession(workspace, repo, path, options) {
+      const force = Boolean(options && options.force);
+      const deleteBranch = Boolean(options && options.deleteBranch);
       const result = await rpc('worktree-remove', {
         workspace,
         repo,
         path,
-        force: Boolean(options && options.force),
-        deleteBranch: Boolean(options && options.deleteBranch),
+        force,
+        deleteBranch,
+        // Both flags only arrive from an explicit, user-facing step: the inline
+        // force confirmation after a WORKTREE_DIRTY refusal, or the "delete
+        // branch too" checkbox. The host refuses the destructive removal
+        // without this record.
+        confirm: force || deleteBranch,
       });
       if (worktreeBridge) {
         const items = worktreeBridge.list();

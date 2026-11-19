@@ -499,12 +499,23 @@ async function main() {
       path: added.path,
     }, 'WORKTREE_DIRTY');
 
+    // A force removal deletes the dirty checkout, so it must carry the caller's
+    // explicit confirmation; without it the host refuses before touching disk.
+    await fail({
+      op: 'worktree-remove',
+      workspace: fixture.workspace,
+      repo: fixture.beta,
+      path: added.path,
+      force: true,
+    }, 'CONFIRM_REQUIRED');
+
     const removed = await ok({
       op: 'worktree-remove',
       workspace: fixture.workspace,
       repo: fixture.beta,
       path: added.path,
       force: true,
+      confirm: true,
     });
     assert.equal(removed.removed, true);
     assert.equal(removed.branchDeleted, false);
@@ -517,12 +528,21 @@ async function main() {
       name: 'clean-up',
       baseRef: 'main',
     });
+    // Deleting the branch during removal loses its commits: same explicit gate.
+    await fail({
+      op: 'worktree-remove',
+      workspace: fixture.workspace,
+      repo: fixture.beta,
+      path: second.path,
+      deleteBranch: true,
+    }, 'CONFIRM_REQUIRED');
     const removedWithBranch = await ok({
       op: 'worktree-remove',
       workspace: fixture.workspace,
       repo: fixture.beta,
       path: second.path,
       deleteBranch: true,
+      confirm: true,
     });
     assert.equal(removedWithBranch.branchDeleted, true);
     assert.equal(git(fixture.beta, 'branch', '--list', 'wt/clean-up').trim(), '');

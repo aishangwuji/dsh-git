@@ -34,7 +34,9 @@
     "LICENSE"
   ],
   "scripts": {
-    "test": "node --test test/host.test.mjs test/client.test.mjs"
+    "test": "node --test test/host.test.mjs test/client.test.mjs test/invariants.test.mjs",
+    "check:render": "node scripts/ssr-check.mjs && node scripts/panel-render-check.mjs",
+    "check": "npm test && npm run check:render"
   },
   "dsh": {
     "bundle": {

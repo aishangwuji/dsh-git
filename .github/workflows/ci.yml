@@ -14,8 +14,12 @@ jobs:
         with:
           node-version: 22
       # 插件运行时没有任何 npm 依赖（只用 Node 内置模块），所以不需要 install。
-      - name: host route tests
-        run: node --test test/host.test.mjs test/client.test.mjs
+      - name: host, client and invariant tests
+        run: node --test test/host.test.mjs test/client.test.mjs test/invariants.test.mjs
+      - name: render checks
+        run: |
+          node scripts/ssr-check.mjs
+          node scripts/panel-render-check.mjs
       - name: syntax check
         run: |
           node --check index.js
