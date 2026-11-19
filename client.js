@@ -834,6 +834,292 @@ window.__ModuleLoader__.load({
       return json.value;
     }
 
+    /* ------------------------------ first-paint cache ------------------------------ */
+    /**
+     * The panel is remounted every time it is opened again (sidebar seat, main
+     * tab, session switch), and a cold mount used to paint an empty frame and
+     * then wait through `workspaces` → repository discovery → full status →
+     * history, one round trip after another. This cache keeps the last page each
+     * workspace produced, so the next mount renders it synchronously and
+     * revalidates behind it (stale-while-revalidate): real Git data on the first
+     * frame, corrected a moment later.
+     *
+     * The two entries age differently:
+     * - the workspace page (files, branch, counts) keeps a 10 minute seed TTL —
+     *   freshness is the mount refresh's job, the TTL only decides how old a
+     *   seed may be to still paint the first screen;
+     * - the history page costs two Git spawns to rebuild and barely moves, so it
+     *   is kept warm with an LRU of three repositories and no expiry.
+     *
+     * `sessionStorage` (not `localStorage`) keeps the seed for the life of the
+     * tab: a reload paints instantly too, while a fresh process start is cold.
+     * Every read/write is best-effort — private mode, quota and corrupt payloads
+     * degrade to "no seed", never to an error, and a seed only ever fills states
+     * that are still empty (it can never roll back live data).
+     */
+    const PAINT_KEY = 'dsh-git.paint.v1';
+    const PAINT_STATUS_TTL_MS = 10 * 60_000;
+    const PAINT_STATUS_KEEP_WARM = 4;
+    const PAINT_GRAPH_KEEP_WARM = 3;
+    const paintStatus = new Map();
+    const paintGraph = new Map();
+    let paintWorkspaces = [];
+    let paintHydrated = false;
+
+    function paintWorkspaceRow(row) {
+      return Boolean(row) && typeof row === 'object' && typeof row.path === 'string';
+    }
+
+    /** Move an entry to the tail, so eviction follows real use, not write order. */
+    function paintTouch(map, key) {
+      const entry = map.get(key);
+      if (entry === undefined) return undefined;
+      map.delete(key);
+      map.set(key, entry);
+      return entry;
+    }
+
+    function paintCap(map, size) {
+      while (map.size > size) map.delete(map.keys().next().value);
+    }
+
+    function hydratePaint() {
+      if (paintHydrated) return;
+      paintHydrated = true;
+      let parsed = null;
+      try {
+        const raw = sessionStorage.getItem(PAINT_KEY);
+        if (typeof raw === 'string' && raw !== '') parsed = JSON.parse(raw);
+      } catch {
+        return;
+      }
+      if (!parsed || typeof parsed !== 'object') return;
+      const feed = (map, stored, cap) => {
+        if (!stored || typeof stored !== 'object') return;
+        let count = 0;
+        for (const key of Object.keys(stored)) {
+          const entry = stored[key];
+          if (!entry || typeof entry !== 'object' || typeof entry.at !== 'number') continue;
+          // A write that happened before this read is always the fresher one.
+          if (map.has(key)) continue;
+          if (count >= cap) break;
+          map.set(key, entry);
+          count += 1;
+        }
+      };
+      feed(paintStatus, parsed.status, PAINT_STATUS_KEEP_WARM);
+      feed(paintGraph, parsed.graph, PAINT_GRAPH_KEEP_WARM);
+      if (Array.isArray(parsed.workspaces)) paintWorkspaces = parsed.workspaces.filter(paintWorkspaceRow);
+    }
+
+    function persistPaint() {
+      try {
+        const pack = (map) => {
+          const out = {};
+          for (const [key, entry] of map) out[key] = entry;
+          return out;
+        };
+        sessionStorage.setItem(PAINT_KEY, JSON.stringify({
+          status: pack(paintStatus),
+          graph: pack(paintGraph),
+          workspaces: paintWorkspaces,
+        }));
+      } catch {
+        // A quota or private-mode failure only costs the next mount its seed.
+      }
+    }
+
+    function readPaintWorkspaces() {
+      hydratePaint();
+      return paintWorkspaces;
+    }
+
+    function writePaintWorkspaces(list) {
+      paintWorkspaces = (Array.isArray(list) ? list : []).filter(paintWorkspaceRow);
+      persistPaint();
+    }
+
+    /** The last workspace page, or undefined when missing or past its seed TTL. */
+    function readPaintStatus(workspace) {
+      if (!workspace) return undefined;
+      hydratePaint();
+      const entry = paintTouch(paintStatus, workspace);
+      if (!entry) return undefined;
+      if (Date.now() - entry.at > PAINT_STATUS_TTL_MS) {
+        paintStatus.delete(workspace);
+        return undefined;
+      }
+      return entry;
+    }
+
+    /** `repo` is the host's `repoRoot` for this page, so the seed never lies about which checkout it shows. */
+    function writePaintStatus(workspace, repo, data) {
+      if (!workspace || !data || typeof data !== 'object') return;
+      paintStatus.delete(workspace);
+      paintStatus.set(workspace, { at: Date.now(), repo: repo || null, data });
+      paintCap(paintStatus, PAINT_STATUS_KEEP_WARM);
+      persistPaint();
+    }
+
+    function readPaintGraph(repo) {
+      if (!repo) return undefined;
+      hydratePaint();
+      return paintTouch(paintGraph, repo);
+    }
+
+    function writePaintGraph(repo, page) {
+      if (!repo || !page) return;
+      paintGraph.delete(repo);
+      paintGraph.set(repo, {
+        at: Date.now(),
+        commits: Array.isArray(page.commits) ? page.commits : [],
+        hasMore: page.hasMore === true,
+      });
+      paintCap(paintGraph, PAINT_GRAPH_KEEP_WARM);
+      persistPaint();
+    }
+
+    /**
+     * Everything the panel needs for its first frame, or a cold start when the
+     * cache is empty. Only fields the cache can vouch for are seeded: a status
+     * page always carries the repository it describes, so the header, the
+     * changes tree and the history seed can never disagree about which checkout
+     * is on screen.
+     */
+    function readBootSeed() {
+      const known = readPaintWorkspaces();
+      const saved = readStorage('dsh-git.workspace');
+      let workspace = '';
+      if (saved && (known.length === 0 || known.some((row) => samePath(row.path, saved)))) workspace = saved;
+      else if (known.length > 0) workspace = known[0].path;
+      else if (saved) workspace = saved;
+      const entry = workspace ? readPaintStatus(workspace) : undefined;
+      const repo = entry && entry.repo ? entry.repo : '';
+      const page = repo ? readPaintGraph(repo) : undefined;
+      return {
+        workspaces: known,
+        workspace,
+        status: entry ? entry.data : null,
+        repo,
+        graph: page ? page.commits : null,
+        graphHasMore: page ? page.hasMore === true : false,
+      };
+    }
+
+    /**
+     * The repository the panel opens with: the last one used for this workspace,
+     * else the busiest project, else the workspace's own repository. Shared with
+     * the prewarmer so the warmed page is exactly the page the panel paints.
+     * `discovered` is the host's answer for the whole workspace, whose
+     * `repoRoot` already carries the primary repository's full status.
+     */
+    function pickBootstrapRepo(discovered, saved) {
+      const list = Array.isArray(discovered && discovered.repos) ? discovered.repos : [];
+      if (list.length === 0) return null;
+      // A repository whose work tree cannot be read (an uninitialised
+      // submodule, for instance) is not a useful default.
+      const usable = list.filter((item) => !item.error);
+      const candidates = usable.length > 0 ? usable : list;
+      const byChanged = (a, b) => {
+        const left = a.counts ? a.counts.changed || 0 : 0;
+        const right = b.counts ? b.counts.changed || 0 : 0;
+        return right - left || (a.relativePath || '').localeCompare(b.relativePath || '');
+      };
+      // Prefer a project with pending work over a dependency that happens to
+      // have changes, then any changed repository, then the workspace's own
+      // repository.
+      const preferred = candidates.filter((item) => repoIsProject(item) && repoChanged(item)).sort(byChanged)[0]
+        || candidates.filter(repoChanged).sort(byChanged)[0]
+        || candidates.find((item) => samePath(item.root, discovered.repoRoot))
+        || candidates[0];
+      return candidates.find((item) => samePath(item.root, saved)) || preferred;
+    }
+
+    /* ------------------------------ first-paint prewarm ------------------------------ */
+    /**
+     * The cache above only fills when a panel mounts, so the very first open in
+     * a workspace still paid the full cold start. This prewarmer closes that gap
+     * from the one place the panel's own choice is known before it mounts: it
+     * runs exactly the reads the first paint would run, for exactly the
+     * workspace and repository the panel is about to open, and writes them into
+     * the same cache. Read routes only, silent on every failure: a broken
+     * prewarm just means that panel opens cold.
+     *
+     * It is deliberately not tied to sessions: this panel opens on the workspace
+     * it remembers (the header switcher is the only thing that changes it), so
+     * the active session's directory is not what would be painted.
+     */
+    const PREWARM_INITIAL_DELAY_MS = 1200;
+    const PREWARM_FRESH_MS = 15_000;
+    let prewarmTimer = null;
+    let prewarmGeneration = 0;
+
+    async function prewarmWorkspace(workspacePath) {
+      const generation = ++prewarmGeneration;
+      try {
+        const warm = readPaintStatus(workspacePath);
+        const warmEnough = Boolean(warm) && Date.now() - warm.at < PREWARM_FRESH_MS;
+        if (warmEnough && (!warm.repo || readPaintGraph(warm.repo) !== undefined)) return;
+        let discovered = warmEnough ? warm.data : null;
+        if (!discovered) {
+          discovered = await rpc('status', { workspace: workspacePath });
+          // A newer prewarm arrived while this read ran: drop the stale answer.
+          if (generation !== prewarmGeneration) return;
+          writePaintStatus(workspacePath, discovered && discovered.repoRoot, discovered);
+          if (!discovered || discovered.isRepo !== true) return;
+        } else if (discovered.isRepo !== true) {
+          return;
+        }
+        const chosen = pickBootstrapRepo(discovered, readStorage(`dsh-git.repo:${workspacePath}`));
+        if (!chosen) return;
+        if (!samePath(chosen.root, discovered.repoRoot)) {
+          const scoped = await rpc('status', { workspace: workspacePath, repo: chosen.root });
+          if (generation !== prewarmGeneration) return;
+          writePaintStatus(workspacePath, chosen.root, scoped);
+        }
+        if (readPaintGraph(chosen.root) !== undefined) return;
+        const history = await rpc('graph', { workspace: workspacePath, repo: chosen.root });
+        if (generation !== prewarmGeneration) return;
+        writePaintGraph(chosen.root, history);
+      } catch {
+        // Prewarming is opportunistic; the panel's own mount read stays the authority.
+      }
+    }
+
+    /**
+     * The workspace the panel opens on: the remembered one while it is still
+     * registered, else the first registered workspace (the same rule `GitPanel`
+     * applies at mount, and `readBootSeed` at seed time).
+     */
+    function bootWorkspaceOf(workspaces, saved) {
+      if (saved && workspaces.some((row) => samePath(row.path, saved))) return saved;
+      return workspaces[0] ? workspaces[0].path : '';
+    }
+
+    async function prewarmFirstPaint() {
+      let workspaces = readPaintWorkspaces();
+      if (workspaces.length === 0) {
+        try {
+          workspaces = await rpc('workspaces');
+          writePaintWorkspaces(workspaces);
+        } catch {
+          return;
+        }
+      }
+      const workspace = bootWorkspaceOf(workspaces, readStorage('dsh-git.workspace'));
+      if (!workspace) return;
+      await prewarmWorkspace(workspace);
+    }
+
+    /** Debounced entry point: one warm per boot, after the shell settled. */
+    function schedulePrewarm(delay = PREWARM_INITIAL_DELAY_MS) {
+      if (prewarmTimer !== null) clearTimeout(prewarmTimer);
+      prewarmTimer = setTimeout(() => {
+        prewarmTimer = null;
+        void prewarmFirstPaint();
+      }, delay);
+    }
+
     /**
      * Shared worktree flow for both the Git panel and the composer branch pill:
      * create the managed checkout, then register its workspace and open a blank
@@ -2839,6 +3125,31 @@ window.__ModuleLoader__.load({
           h(IconClose, { size: 13 })));
     }
 
+    /**
+     * Cold-start placeholder in the panel's own three-pane shape, so the first
+     * frame reads as "layout, filling in" rather than an empty box with a
+     * spinner. It only ever shows when there is no seed to paint.
+     */
+    function GitSkeleton() {
+      const bars = (count, key) => Array.from({ length: count }, (_, index) => h('div', {
+        key: `${key}-${index}`,
+        className: 'dshg-skeleton-row',
+      }, h('span', {
+        className: 'dshg-skeleton-bar',
+        style: { width: `${38 + ((index * 19) % 52)}%` },
+      })));
+      return h('div', { className: 'dshg-skeleton', 'aria-hidden': 'true' },
+        h('div', { className: 'dshg-skeleton-col' },
+          h('div', { className: 'dshg-skeleton-head' }),
+          bars(7, 'changes')),
+        h('div', { className: 'dshg-skeleton-col' },
+          h('div', { className: 'dshg-skeleton-head' }),
+          bars(9, 'history')),
+        h('div', { className: 'dshg-skeleton-col' },
+          h('div', { className: 'dshg-skeleton-head' }),
+          bars(6, 'diff')));
+    }
+
     function GitPanel() {
       const rootRef = useRef(null);
       const busyRef = useRef(false);
@@ -2846,21 +3157,36 @@ window.__ModuleLoader__.load({
       const bootstrapSeq = useRef(0);
       const prefixTimer = useRef(null);
       const draftTimer = useRef(null);
-      const [workspaces, setWorkspaces] = useState([]);
-      const [workspace, setWorkspace] = useState('');
-      const [repos, setRepos] = useState([]);
-      const [repo, setRepo] = useState('');
+      /**
+       * The first frame comes from the paint cache (lazy initial state, so it is
+       * read once per mount): a workspace this panel has already shown paints
+       * its branch, changed files and history immediately, and the effects below
+       * revalidate them in the background instead of blanking the panel for a
+       * spinner. `seedRef` tells the repository effect which checkout the seeded
+       * history page belongs to, and `lastWorkspaceRef` keeps the mount effects
+       * from resetting the page that is already on screen.
+       */
+      const [seed] = useState(readBootSeed);
+      const seedRef = useRef(seed);
+      /** The workspace whose page the mount effects must not clear (see below). */
+      const lastWorkspaceRef = useRef(seed.status ? seed.workspace : null);
+      /** Marks a status page fetched seconds ago, so mount does not re-read it. */
+      const freshRef = useRef(null);
+      const [workspaces, setWorkspaces] = useState(seed.workspaces);
+      const [workspace, setWorkspace] = useState(seed.workspace);
+      const [repos, setRepos] = useState(() => (seed.status && Array.isArray(seed.status.repos) ? seed.status.repos : []));
+      const [repo, setRepo] = useState(seed.repo);
       const [showAllRepos, setShowAllRepos] = useState(() => readStorage('dsh-git.repoScope') === 'all');
-      const [status, setStatus] = useState(null);
-      const [loading, setLoading] = useState(true);
+      const [status, setStatus] = useState(seed.status);
+      const [loading, setLoading] = useState(!seed.status);
       const [busy, setBusy] = useState('');
       const [toast, setToast] = useState(null);
       const [expanded, setExpanded] = useState({});
       const [selected, setSelected] = useState(null);
       const [diff, setDiff] = useState(null);
       const [diffLoading, setDiffLoading] = useState(false);
-      const [graph, setGraph] = useState(null);
-      const [graphHasMore, setGraphHasMore] = useState(false);
+      const [graph, setGraph] = useState(seed.graph);
+      const [graphHasMore, setGraphHasMore] = useState(seed.graphHasMore);
       const [graphLoading, setGraphLoading] = useState(false);
       const [graphVersion, setGraphVersion] = useState(0);
       const [commitDetail, setCommitDetail] = useState(null);
@@ -2893,6 +3219,11 @@ window.__ModuleLoader__.load({
             : { workspace: targetWorkspace });
           if (seq === statusSeq.current) {
             applyStatus(next);
+            // Keep the paint cache in step with what is on screen: the next
+            // mount (and the prewarmer) seeds from exactly this page.
+            const pageRepo = next && next.repoRoot ? next.repoRoot : targetRepo;
+            writePaintStatus(targetWorkspace, pageRepo, next);
+            freshRef.current = { workspace: targetWorkspace, repo: pageRepo, at: Date.now() };
             setLoading(false);
             window.dispatchEvent(new Event('dsh-git:refresh'));
           }
@@ -2911,9 +3242,11 @@ window.__ModuleLoader__.load({
       }, [applyStatus]);
 
       /**
-       * Pick the repository the panel opens with: the last one used for this
-       * workspace, else the busiest one, else the workspace-root one. `seq`
-       * discards the answer when the workspace changed meanwhile.
+       * Learn the repository list of a workspace, then pick one. The discovery
+       * read already carries the primary repository's full status, so when the
+       * pick lands on that same repository the panel paints from this response
+       * instead of asking for the identical page a second time. `seq` discards
+       * the answer when the workspace changed meanwhile.
        */
       const bootstrap = useCallback(async (targetWorkspace, seq) => {
         try {
@@ -2922,35 +3255,26 @@ window.__ModuleLoader__.load({
           const list = Array.isArray(next.repos) ? next.repos : [];
           setRepos(list);
           if (list.length === 0) {
+            writePaintStatus(targetWorkspace, null, next);
             setStatus(next);
             setLoading(false);
             return;
           }
-          const saved = readStorage(`dsh-git.repo:${targetWorkspace}`);
-          // A repository whose work tree cannot be read (an uninitialised
-          // submodule, for instance) is not a useful default.
-          const usable = list.filter((item) => !item.error);
-          const candidates = usable.length > 0 ? usable : list;
-          const byChanged = (a, b) => {
-            const left = a.counts ? a.counts.changed || 0 : 0;
-            const right = b.counts ? b.counts.changed || 0 : 0;
-            return right - left || (a.relativePath || '').localeCompare(b.relativePath || '');
-          };
-          // Prefer a project with pending work over a dependency that happens
-          // to have changes, then any changed repository, then the workspace's
-          // own repository.
-          const preferred = candidates.filter((item) => repoIsProject(item) && repoChanged(item)).sort(byChanged)[0]
-            || candidates.filter(repoChanged).sort(byChanged)[0]
-            || candidates.find((item) => samePath(item.root, next.repoRoot))
-            || candidates[0];
-          const chosen = candidates.find((item) => samePath(item.root, saved)) || preferred;
+          const chosen = pickBootstrapRepo(next, readStorage(`dsh-git.repo:${targetWorkspace}`));
+          if (!chosen) return;
+          if (samePath(chosen.root, next.repoRoot) && Array.isArray(next.entries)) {
+            applyStatus(next);
+            writePaintStatus(targetWorkspace, chosen.root, next);
+            freshRef.current = { workspace: targetWorkspace, repo: chosen.root, at: Date.now() };
+            setLoading(false);
+          }
           setRepo(chosen.root);
         } catch (error) {
           if (seq !== bootstrapSeq.current) return;
           setLoading(false);
           setToast({ kind: 'error', text: errorText(error), detail: error.detail || null });
         }
-      }, []);
+      }, [applyStatus]);
 
       const loadDiff = useCallback(async (targetWorkspace, targetRepo, path, mode) => {
         if (!targetWorkspace || !path) return;
@@ -2976,6 +3300,9 @@ window.__ModuleLoader__.load({
         const next = await rpc('graph', { workspace: targetWorkspace, repo: targetRepo });
         setGraph(next.commits || []);
         setGraphHasMore(Boolean(next.hasMore));
+        // The history is the second half of the first screen: keep its first
+        // page warm so the next mount paints the middle pane too.
+        writePaintGraph(targetRepo, next);
       }, []);
 
       const loadMoreCommits = useCallback(async () => {
@@ -3105,6 +3432,7 @@ window.__ModuleLoader__.load({
         let alive = true;
         rpc('workspaces').then((list) => {
           if (!alive) return;
+          writePaintWorkspaces(list);
           setWorkspaces(list);
           const saved = readStorage('dsh-git.workspace');
           const picked = list.find((item) => item.path === saved) || list[0];
@@ -3130,6 +3458,13 @@ window.__ModuleLoader__.load({
 
       useEffect(() => {
         if (!workspace) return;
+        // Only a real workspace switch resets the panel. The workspace that was
+        // painted from the seed on mount therefore keeps its page while the
+        // effects below revalidate it in place — clearing here is what used to
+        // flash an empty panel on every reopen — and an effect re-run (React's
+        // dev double-invoke) is a no-op instead of a reset.
+        if (lastWorkspaceRef.current !== null && samePath(lastWorkspaceRef.current, workspace)) return;
+        lastWorkspaceRef.current = workspace;
         // Invalidate every read still in flight for the previous workspace.
         statusSeq.current += 1;
         bootstrapSeq.current += 1;
@@ -3167,13 +3502,24 @@ window.__ModuleLoader__.load({
         setCommitDetail(null);
         setDetailFile(null);
         setDetailFileDiff(null);
-        setGraph(null);
-        setGraphHasMore(false);
+        // A seeded history page belongs to one repository; clearing it while the
+        // same repository is being re-read would flash an empty middle pane.
+        const seed = seedRef.current;
+        if (!seed || !samePath(seed.repo, repo)) {
+          setGraph(null);
+          setGraphHasMore(false);
+        }
         setAmend(false);
         setSignoff(false);
         setDialog(null);
         setGraphVersion((value) => value + 1);
-        refreshStatus(workspace, repo, true);
+        // `bootstrap` may have painted this exact page from its own response a
+        // moment ago; re-reading it would only cost another Git round trip.
+        const fresh = freshRef.current;
+        const reused = Boolean(fresh) && fresh.workspace === workspace
+          && samePath(fresh.repo, repo) && Date.now() - fresh.at < 1500;
+        freshRef.current = null;
+        if (!reused) refreshStatus(workspace, repo, true);
         const timer = setInterval(() => {
           if (busyRef.current) return;
           if (document.visibilityState === 'hidden') return;
@@ -3192,7 +3538,11 @@ window.__ModuleLoader__.load({
       useEffect(() => {
         if (!workspace || !repo) return undefined;
         let alive = true;
-        setGraphLoading(true);
+        // A seeded history page is already on screen: re-read it silently rather
+        // than replacing it with a loading placeholder.
+        const seed = seedRef.current;
+        const painted = Boolean(seed) && Boolean(seed.graph) && samePath(seed.repo, repo);
+        if (!painted) setGraphLoading(true);
         loadGraph(workspace, repo).then(() => {
           if (alive) setGraphLoading(false);
         }).catch((error) => {
@@ -3608,7 +3958,7 @@ window.__ModuleLoader__.load({
         icon: h(GitGlyph, { size: 30 }),
         title: t('noWorkspace'),
       }) : null,
-      loading && !status ? h('div', { className: 'dshg-loading' }, t('loading')) : null,
+      loading && !status ? h(GitSkeleton) : null,
       status && !status.isRepo ? h(EmptyState, {
         icon: h(GitGlyph, { size: 34 }),
         title: t('notRepo'),
@@ -4136,7 +4486,38 @@ window.__ModuleLoader__.load({
       .dshg-empty-icon { color: var(--dsw-alias-label-tertiary, #6b7280); }
       .dshg-empty-title { color: var(--dsw-alias-label-primary, #111); font-size: 13px; font-weight: 600; }
       .dshg-empty-desc { max-width: 360px; font-size: 12px; line-height: 1.5; }
-      .dshg-loading { flex: 1 1 auto; display: flex; align-items: center; justify-content: center; color: var(--dsw-alias-label-tertiary, #6b7280); font-size: 12px; }
+      /* Cold-start skeleton: the panel's own three-pane shape, so the first
+         frame is a layout filling in rather than an empty box with a spinner.
+         Only rendered when the paint cache had nothing to show. */
+      .dshg-skeleton {
+        flex: 1 1 auto;
+        display: grid;
+        grid-template-columns: minmax(0, 1fr) minmax(0, 1.35fr) minmax(0, 1fr);
+        gap: 10px;
+        min-height: 0;
+        padding: 10px 12px 12px;
+      }
+      .dshg-skeleton-col { display: flex; flex-direction: column; gap: 9px; min-width: 0; }
+      .dshg-skeleton-row { display: flex; align-items: center; height: 14px; }
+      .dshg-skeleton-head {
+        height: 16px;
+        width: 42%;
+        border-radius: 4px;
+        background: var(--dsw-alias-bg-secondary, rgba(127, 127, 127, 0.12));
+      }
+      .dshg-skeleton-bar {
+        display: block;
+        height: 9px;
+        border-radius: 4px;
+        background: var(--dsw-alias-bg-secondary, rgba(127, 127, 127, 0.12));
+        animation: dshg-skeleton-pulse 1.4s ease-in-out infinite;
+      }
+      .dshg-skeleton-col:nth-child(2) .dshg-skeleton-bar { animation-delay: .15s; }
+      .dshg-skeleton-col:nth-child(3) .dshg-skeleton-bar { animation-delay: .3s; }
+      @keyframes dshg-skeleton-pulse { 0%, 100% { opacity: .35; } 50% { opacity: .8; } }
+      @media (prefers-reduced-motion: reduce) {
+        .dshg-skeleton-bar { animation: none; opacity: .5; }
+      }
 
       /* History --------------------------------------------------------- */
       .dshg-history-columns {
@@ -4612,6 +4993,12 @@ window.__ModuleLoader__.load({
         .dshg-left { width: 270px; }
         .dshg-btn-label { display: none; }
         .dshg-commit-hint { display: none; }
+        .dshg-skeleton { grid-template-columns: minmax(0, 1fr) minmax(0, 1.2fr); }
+        .dshg-skeleton-col:nth-child(3) { display: none; }
+      }
+      @media (max-width: 640px) {
+        .dshg-skeleton { grid-template-columns: minmax(0, 1fr); }
+        .dshg-skeleton-col:nth-child(2) { display: none; }
       }
     `;
 
@@ -5113,6 +5500,22 @@ window.__ModuleLoader__.load({
         };
       });
 
+      // Warm the first-paint cache in the background, once the shell has
+      // settled, so the panel's first open in this workspace is not a cold read.
+      // Read routes only; a failure just means that panel opens cold.
+      ctx.effect(() => {
+        schedulePrewarm();
+        return () => {
+          if (prewarmTimer !== null) {
+            clearTimeout(prewarmTimer);
+            prewarmTimer = null;
+          }
+          // Drop a prewarm still in flight so it cannot write a seed after the
+          // plugin was reloaded.
+          prewarmGeneration += 1;
+        };
+      }, 'dsh-git: first-paint prewarm');
+
       ctx.slots.inject('conversation.input.dock', () => ctx.slots.register({
         name: 'conversation.input.dock',
         id: 'git-branch',
@@ -5171,6 +5574,34 @@ window.__ModuleLoader__.load({
       }, GitDocumentStatus));
     }
 
-    return { inject: ['slots', 'locale', 'layout'], apply };
+    const shipped = { inject: ['slots', 'locale', 'layout'], apply };
+    /**
+     * Read-only seam for `test/client.test.mjs`: the first-paint cache and the
+     * prewarm planner live in this module's closure and are pure except for
+     * `fetch`/storage, so the harness can exercise them without React. It is
+     * only attached when the harness opts in, so the module the loader receives
+     * is exactly the plugin definition it expects.
+     */
+    if (window.__DSH_GIT_TEST__ === true) {
+      shipped.__paint = {
+        readBootSeed,
+        readPaintStatus,
+        writePaintStatus,
+        readPaintGraph,
+        writePaintGraph,
+        readPaintWorkspaces,
+        writePaintWorkspaces,
+        pickBootstrapRepo,
+        schedulePrewarm,
+        resetPrewarm() {
+          if (prewarmTimer !== null) {
+            clearTimeout(prewarmTimer);
+            prewarmTimer = null;
+          }
+          prewarmGeneration += 1;
+        },
+      };
+    }
+    return shipped;
   },
 });
