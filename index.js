@@ -1654,50 +1654,100 @@ export function apply(ctx) {
    * switcher. Remote names keep the `<remote>/` prefix so a branch can be
    * checked out with a tracking local branch.
    */
+  /** `%(upstream:track)` output → drift against the upstream. */
+  function parseUpstreamTrack(text) {
+    const value = String(text || '');
+    if (value.includes('gone')) return { ahead: 0, behind: 0, gone: true };
+    const ahead = /ahead (\d+)/.exec(value);
+    const behind = /behind (\d+)/.exec(value);
+    return {
+      ahead: ahead ? Number(ahead[1]) : 0,
+      behind: behind ? Number(behind[1]) : 0,
+      gone: false,
+    };
+  }
+
+  /**
+   * Branch tree data: local branches with their upstream drift and the worktree
+   * that already has them checked out, remote branches, tags, and the current
+   * HEAD. One `for-each-ref` covers all three ref stores, and one
+   * `git worktree list` marks branches that are busy in another checkout, so a
+   * long branch list stays a single round trip.
+   */
   async function readBranches(workspacePath, repoValue, signal) {
     const root = await operationRepo(workspacePath, repoValue, signal);
     const snapshot = await readRepoSnapshot(root, signal);
-    if (snapshot.isBare) return { local: [], remote: [], current: null, upstream: null, detached: false };
+    if (snapshot.isBare) return { local: [], remote: [], tags: [], current: null, upstream: null, detached: false };
 
-    const [localResult, remoteResult] = await Promise.all([
-      runGit(root, ['for-each-ref', '--format=%(refname:short)%00%(HEAD)', 'refs/heads'], { signal, timeoutMs: 15_000 }),
-      runGit(root, ['for-each-ref', '--format=%(refname:short)%00%(symref)', 'refs/remotes'], { signal, timeoutMs: 15_000 }),
+    const [refsResult, worktreeResult, aux] = await Promise.all([
+      runGit(root, [
+        'for-each-ref',
+        '--format=%(refname)%00%(refname:short)%00%(objectname:short)%00%(upstream:short)%00%(upstream:track)%00%(HEAD)%00%(committerdate:unix)',
+        'refs/heads', 'refs/remotes', 'refs/tags',
+      ], { signal, timeoutMs: 15_000 }),
+      runGit(root, ['worktree', 'list', '--porcelain'], { signal, timeoutMs: 15_000 }),
+      readAux(root, signal),
     ]);
-    if (localResult.code !== 0) {
-      throw new GitError('GIT_COMMAND_FAILED', localResult.stderr.trim() || '读取分支失败');
-    }
-    if (remoteResult.code !== 0) {
-      throw new GitError('GIT_COMMAND_FAILED', remoteResult.stderr.trim() || '读取远端分支失败');
+    if (refsResult.code !== 0) {
+      throw new GitError('GIT_COMMAND_FAILED', refsResult.stderr.trim() || '读取分支失败');
     }
 
+    // Which branch is checked out where: a branch already busy in another
+    // worktree cannot be checked out here, and the UI says so instead of
+    // letting `git checkout` fail.
+    const worktreeByBranch = new Map();
+    if (worktreeResult.code === 0) {
+      for (const row of parseWorktreeList(worktreeResult.stdout, worktreesHome())) {
+        if (row.branch) worktreeByBranch.set(row.branch, { path: row.path, main: row.main });
+      }
+    }
+
+    const remotes = aux.remotes;
+    const longestFirst = remotes.slice().sort((a, b) => b.length - a.length);
     const local = [];
-    for (const line of localResult.stdout.split('\n')) {
+    const remote = [];
+    const tags = [];
+    for (const line of refsResult.stdout.split('\n')) {
       if (!line) continue;
-      const [name, head] = line.split('\0');
-      if (!name) continue;
-      local.push({ name, current: head === '*' });
+      const [refname, short, sha, upstream, track, head] = line.split('\0');
+      if (!refname || !short) continue;
+      if (refname.startsWith('refs/heads/')) {
+        const drift = parseUpstreamTrack(track);
+        const mark = worktreeByBranch.get(short);
+        local.push({
+          name: short,
+          sha,
+          current: head === '*',
+          upstream: upstream || null,
+          ahead: drift.ahead,
+          behind: drift.behind,
+          gone: drift.gone,
+          worktree: mark ? mark.path : null,
+          worktreeMain: mark ? mark.main : false,
+        });
+        continue;
+      }
+      if (refname.startsWith('refs/remotes/')) {
+        // `refs/remotes/<remote>/HEAD` is a symbolic alias, not a branch.
+        if (short.endsWith('/HEAD')) continue;
+        const remoteName = longestFirst.find((item) => short === item || short.startsWith(`${item}/`)) || '';
+        const branchName = remoteName ? short.slice(remoteName.length + 1) : short;
+        if (!branchName) continue;
+        remote.push({ name: short, sha, remote: remoteName, branch: branchName });
+        continue;
+      }
+      if (refname.startsWith('refs/tags/')) {
+        tags.push({ name: short, sha });
+      }
     }
     local.sort((a, b) => (b.current - a.current) || a.name.localeCompare(b.name));
-
-    const remotes = (await readAux(root, signal)).remotes;
-    const longestFirst = remotes.slice().sort((a, b) => b.length - a.length);
-    const remote = [];
-    for (const line of remoteResult.stdout.split('\n')) {
-      if (!line) continue;
-      const [name, symref] = line.split('\0');
-      if (!name) continue;
-      // `refs/remotes/origin/HEAD` is a symbolic alias, not a branch.
-      if (symref) continue;
-      const remoteName = longestFirst.find((item) => name === item || name.startsWith(`${item}/`)) || '';
-      const shortName = remoteName ? name.slice(remoteName.length + 1) : name;
-      if (!shortName) continue;
-      remote.push({ name, remote: remoteName, branch: shortName });
-    }
     remote.sort((a, b) => a.name.localeCompare(b.name));
+    tags.sort((a, b) => a.name.localeCompare(b.name));
 
     return {
       local,
       remote,
+      tags,
       current: snapshot.branch || null,
       upstream: snapshot.upstream || null,
       detached: Boolean(snapshot.detached),

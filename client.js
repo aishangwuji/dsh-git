@@ -134,6 +134,12 @@ window.__ModuleLoader__.load({
       branchesRemote: '远端',
       branchesLocalEmpty: '没有本地分支',
       branchesRemoteEmpty: '没有远端分支',
+      branchesEmpty: '没有匹配的分支',
+      branchGroupHead: '当前分支',
+      branchGroupTags: '标签',
+      branchInWorktree: '已在 worktree 中检出：{path}',
+      branchUpstreamGone: '上游已删除',
+      branchTagReadonly: '标签（只读）',
       branchSwitched: '已切换到 {branch}',
       branchTrackingCreated: '已基于 {branch} 创建本地分支',
       checkingOut: '正在切换分支…',
@@ -362,6 +368,12 @@ window.__ModuleLoader__.load({
       branchesRemote: 'Remote',
       branchesLocalEmpty: 'No local branches',
       branchesRemoteEmpty: 'No remote branches',
+      branchesEmpty: 'No matching branches',
+      branchGroupHead: 'Current branch',
+      branchGroupTags: 'Tags',
+      branchInWorktree: 'Checked out in a worktree: {path}',
+      branchUpstreamGone: 'Upstream is gone',
+      branchTagReadonly: 'Tag (read-only)',
       branchSwitched: 'Switched to {branch}',
       branchTrackingCreated: 'Created a local branch from {branch}',
       checkingOut: 'Switching branch…',
@@ -1728,14 +1740,37 @@ window.__ModuleLoader__.load({
         }, children(close)) : null);
     }
 
-    /** Branch switcher: searchable list with the four branch/worktree actions. */
+    /** Fold branch names into `/` folders for the tree view. */
+    function branchFolders(items) {
+      const root = { dirs: new Map(), leaves: [] };
+      for (const item of items) {
+        const parts = String(item.name).split('/');
+        let node = root;
+        for (let index = 0; index < parts.length - 1; index += 1) {
+          const part = parts[index];
+          const path = parts.slice(0, index + 1).join('/');
+          if (!node.dirs.has(part)) node.dirs.set(part, { name: part, path, dirs: new Map(), leaves: [] });
+          node = node.dirs.get(part);
+        }
+        node.leaves.push(item);
+      }
+      return root;
+    }
+
+    /**
+     * Branch tree: HEAD / local / remote / tags, the way a Git tool window
+     * groups them. Local branches fold by `/` into folders (`fix/xxx` reads as a
+     * folder, not a wall of names), each row carries its upstream drift, and a
+     * branch already checked out in another worktree is marked busy instead of
+     * failing at `git checkout` later.
+     */
     function BranchSwitcher({
       status, busy, load, onPick,
       onCreate, onGraph, onCreateWorktree, onManageWorktrees, hero,
     }) {
       const [query, setQuery] = useState('');
-      const [tab, setTab] = useState('local');
-      const [branches, setBranches] = useState({ local: [], remote: [] });
+      const [branches, setBranches] = useState({ local: [], remote: [], tags: [] });
+      const [folded, setFolded] = useState(() => new Set());
       const [loading, setLoading] = useState(false);
       const [failed, setFailed] = useState(null);
 
@@ -1744,17 +1779,13 @@ window.__ModuleLoader__.load({
         setFailed(null);
         try {
           const next = await load();
-          const remote = Array.isArray(next.remote) ? next.remote : [];
           setBranches({
             local: Array.isArray(next.local) ? next.local : [],
-            remote,
+            remote: Array.isArray(next.remote) ? next.remote : [],
+            tags: Array.isArray(next.tags) ? next.tags : [],
           });
-          // The reference branch menu only shows local branches when the
-          // repository has no remote; a stale remote tab must not hide them.
-          if (remote.length === 0) setTab('local');
         } catch (error) {
-          setBranches({ local: [], remote: [] });
-          setTab('local');
+          setBranches({ local: [], remote: [], tags: [] });
           setFailed(error && error.code ? error.code : 'UNKNOWN');
         } finally {
           setLoading(false);
@@ -1763,28 +1794,75 @@ window.__ModuleLoader__.load({
 
       const label = status.detached ? t('detached') : status.branch || '—';
       const needle = query.trim().toLowerCase();
-      const local = branches.local || [];
-      const remote = branches.remote || [];
-      const activeTab = tab === 'remote' && remote.length > 0 ? 'remote' : 'local';
-      // Keep the local current branch's upstream at the top of the remote tab:
-      // switching back to it is the most common action after browsing a remote.
-      const source = activeTab === 'local'
-        ? local
-        : remote.slice().sort((left, right) => {
-            const leftUpstream = left.name === status.upstream ? 0 : 1;
-            const rightUpstream = right.name === status.upstream ? 0 : 1;
-            return leftUpstream - rightUpstream || left.name.localeCompare(right.name);
-          });
-      const visible = source
-        .filter((item) => !needle || item.name.toLowerCase().includes(needle));
-      const emptyText = activeTab === 'local' ? t('branchesLocalEmpty') : t('branchesRemoteEmpty');
+      const filtering = needle.length > 0;
+      const match = (item) => !filtering || String(item.name).toLowerCase().includes(needle);
+      const head = (branches.local || []).find((item) => item.current) || null;
+      const local = (branches.local || []).filter((item) => !item.current && match(item));
+      const remote = (branches.remote || []).filter(match);
+      const tags = (branches.tags || []).filter(match);
+      const headVisible = head !== null && match(head);
+      const nothing = !loading && !failed && !headVisible && local.length === 0 && remote.length === 0 && tags.length === 0;
 
-      const tabButton = (id, text, count) => h('button', {
+      const toggleFolder = (path) => setFolded((current) => {
+        const next = new Set(current);
+        if (next.has(path)) next.delete(path);
+        else next.add(path);
+        return next;
+      });
+
+      const groupHead = (title, count) => h('div', { className: 'dshg-menu-group', role: 'presentation' },
+        h('span', null, title),
+        typeof count === 'number' ? h('span', { className: 'dshg-menu-group-count' }, count) : null);
+
+      const branchRow = (item, options) => h('button', {
+        key: `${options.group}:${item.name}`,
         type: 'button',
-        className: cx('dshg-menu-tab', activeTab === id && 'active'),
-        onClick: () => setTab(id),
-        'aria-pressed': activeTab === id ? 'true' : 'false',
-      }, text, count > 0 ? h('span', { className: 'dshg-menu-tab-count' }, count) : null);
+        role: 'option',
+        className: cx('dshg-branch-row', options.active && 'active'),
+        style: { paddingLeft: `${8 + (options.depth || 0) * 14}px` },
+        title: item.worktree ? tf('branchInWorktree', { path: item.worktree }) : item.name,
+        'aria-selected': options.active ? 'true' : 'false',
+        onClick: options.onClick,
+      },
+      h('span', { className: cx('dshg-branch-dot', options.active && 'on') }),
+      h('span', { className: 'dshg-branch-name' }, options.leaf || item.name),
+      item.gone ? h('span', { className: 'dshg-branch-gone', title: t('branchUpstreamGone') }, '×') : null,
+      item.worktree ? h('span', { className: 'dshg-branch-worktree', 'aria-hidden': 'true' }, 'W') : null,
+      item.ahead > 0 ? h('span', { className: 'dshg-ahead' }, `↑${item.ahead}`) : null,
+      item.behind > 0 ? h('span', { className: 'dshg-behind' }, `↓${item.behind}`) : null);
+
+      const localRows = (node, depth, rows, close) => {
+        for (const dir of [...node.dirs.values()].sort((left, right) => left.name.localeCompare(right.name))) {
+          // A filter always shows its hits: folding is a browsing aid, not a
+          // reason to hide a match.
+          const open = !folded.has(dir.path) || filtering;
+          rows.push(h('button', {
+            key: `dir:${dir.path}`,
+            type: 'button',
+            className: 'dshg-branch-folder',
+            style: { paddingLeft: `${8 + depth * 14}px` },
+            onClick: () => toggleFolder(dir.path),
+            'aria-expanded': open ? 'true' : 'false',
+            title: dir.path,
+          }, h('span', { className: 'dshg-branch-folder-mark', 'aria-hidden': 'true' }, open ? '▾' : '▸'),
+             h('span', null, dir.name)));
+          if (open) localRows(dir, depth + 1, rows, close);
+        }
+        for (const item of node.leaves) {
+          const leaf = item.name.split('/').pop();
+          rows.push(branchRow(item, {
+            group: 'local',
+            depth,
+            leaf,
+            onClick: () => {
+              if (item.worktree) return;
+              close();
+              void onPick({ branch: item.name });
+            },
+          }));
+        }
+        return rows;
+      };
 
       return h(PillSelect, {
         ariaLabel: t('selectBranch'),
@@ -1803,9 +1881,6 @@ window.__ModuleLoader__.load({
           void refresh();
         },
       }, (close) => h(React.Fragment, null,
-        remote.length > 0 ? h('div', { className: 'dshg-menu-tabs', role: 'tablist' },
-          tabButton('local', t('branchesLocal'), local.length),
-          tabButton('remote', t('branchesRemote'), remote.length)) : null,
         h('input', {
           className: 'dshg-menu-search',
           value: query,
@@ -1821,21 +1896,35 @@ window.__ModuleLoader__.load({
             failed === 'UNKNOWN_OP'
               ? t('branchesStaleHost')
               : tf('branchesFailedWithCode', { code: failed })) : null,
-          !loading && !failed && visible.length === 0 ? h('div', { className: 'dshg-menu-empty' }, emptyText) : null,
-          !loading && !failed ? visible.map((item) => h(MenuItem, {
-            key: item.name,
-            active: activeTab === 'local' ? item.current : false,
-            hint: activeTab === 'local'
-              ? null
-              : (item.name === status.upstream ? t('branchUpstream') : null),
-            onClick: () => {
-              close();
-              if (activeTab === 'local' && item.current) return;
-              void onPick(activeTab === 'local'
-                ? { branch: item.name }
-                : { branch: item.branch, remoteBranch: item.name });
+          !loading && !failed && nothing ? h('div', { className: 'dshg-menu-empty' }, t('branchesEmpty')) : null,
+          !loading && !failed && (headVisible || local.length > 0) ? h(React.Fragment, null,
+            h(React.Fragment, null,
+              headVisible ? h(React.Fragment, null,
+                groupHead(t('branchGroupHead')),
+                branchRow(head, { group: 'head', active: true, onClick: () => close() })) : null),
+            local.length > 0 ? h(React.Fragment, null,
+              groupHead(t('branchesLocal'), local.length),
+              localRows(branchFolders(local), 0, [], close)) : null) : null,
+          !loading && !failed && remote.length > 0 ? h(React.Fragment, null,
+            groupHead(t('branchesRemote'), remote.length),
+            remote.map((item) => branchRow(item, {
+              group: 'remote',
+              hint: item.name === status.upstream ? t('branchUpstream') : null,
+              onClick: () => {
+                close();
+                void onPick({ branch: item.branch, remoteBranch: item.name });
+              },
+            }))) : null,
+          !loading && !failed && tags.length > 0 ? h(React.Fragment, null,
+            groupHead(t('branchGroupTags'), tags.length),
+            tags.map((item) => h('div', {
+              key: `tag:${item.name}`,
+              className: 'dshg-branch-row dshg-branch-tag',
+              title: t('branchTagReadonly'),
             },
-          }, item.name)) : null),
+            h('span', { className: 'dshg-branch-dot' }),
+            h('span', { className: 'dshg-branch-name' }, item.name),
+            item.sha ? h('span', { className: 'dshg-branch-sha' }, item.sha) : null))) : null),
         h('div', { className: 'dshg-menu-actions' },
           h('button', {
             type: 'button',
@@ -4253,6 +4342,53 @@ window.__ModuleLoader__.load({
       .dshg-menu-search:focus { border-color: var(--dsw-alias-state-business-primary, #4a8cff); }
       .dshg-menu-empty, .dshg-menu-error { padding: 8px 10px; color: var(--dsw-alias-label-tertiary, #6b7280); font-size: 11px; }
       .dshg-menu-error { color: var(--dshg-git-deleted); }
+      /* Branch tree: HEAD / local (folded by `/`) / remote / tags. Group
+         captions are quiet, rows reuse the menu row metrics, and the badges on
+         the right carry upstream drift without a second line. */
+      .dshg-menu-group {
+        display: flex; align-items: center; gap: 6px;
+        padding: 6px 8px 3px;
+        color: var(--dsw-alias-label-tertiary, #6b7280);
+        font-size: 9.5px; font-weight: 600; letter-spacing: .04em; text-transform: uppercase;
+      }
+      .dshg-menu-group-count { margin-left: auto; font-weight: 500; opacity: .8; }
+      .dshg-branch-row {
+        display: flex; align-items: center; gap: 6px;
+        width: 100%; min-height: 26px; padding: 0 8px;
+        border: 0; border-radius: 999px; background: transparent; color: inherit;
+        font: inherit; font-size: 12px; text-align: left; cursor: pointer;
+        transition: background-color .1s ease;
+      }
+      .dshg-branch-row:hover, .dshg-branch-row:focus-visible {
+        background: var(--dsw-alias-interactive-bg-hover, rgba(127,127,127,.10));
+        outline: none;
+      }
+      .dshg-branch-row.active { background: var(--dsw-alias-bg-layer-2, #eef2f7); font-weight: 600; }
+      .dshg-branch-row.dshg-branch-tag { cursor: default; color: var(--dsw-alias-label-secondary, #6b7280); }
+      .dshg-branch-row.dshg-branch-tag:hover { background: transparent; }
+      .dshg-branch-folder {
+        display: flex; align-items: center; gap: 5px;
+        width: 100%; min-height: 24px; padding: 0 8px;
+        border: 0; border-radius: 999px; background: transparent; color: var(--dsw-alias-label-secondary, #6b7280);
+        font: inherit; font-size: 11.5px; text-align: left; cursor: pointer;
+      }
+      .dshg-branch-folder:hover { background: var(--dsw-alias-interactive-bg-hover, rgba(127,127,127,.08)); }
+      .dshg-branch-folder-mark { width: 9px; flex: 0 0 auto; font-size: 9px; opacity: .8; }
+      .dshg-branch-dot {
+        width: 5px; height: 5px; flex: 0 0 auto; border-radius: 50%;
+        background: transparent; box-shadow: inset 0 0 0 1px var(--dsw-alias-label-tertiary, #9ca3af);
+      }
+      .dshg-branch-dot.on { background: var(--dshg-git-added); box-shadow: none; }
+      .dshg-branch-name { flex: 1 1 auto; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+      .dshg-branch-hint { flex: 0 0 auto; color: var(--dsw-alias-label-tertiary, #6b7280); font-size: 10px; }
+      .dshg-branch-sha { flex: 0 0 auto; color: var(--dsw-alias-label-tertiary, #6b7280); font-size: 10px; font-family: var(--dsw-font-family-mono, ui-monospace, monospace); }
+      .dshg-branch-gone { flex: 0 0 auto; color: var(--dshg-git-deleted); font-size: 11px; }
+      .dshg-branch-worktree {
+        flex: 0 0 auto; padding: 0 4px; border-radius: 3px;
+        background: var(--dsw-alias-bg-layer-2, #eef2f7);
+        color: var(--dsw-alias-label-secondary, #6b7280);
+        font-size: 9px; font-weight: 700; letter-spacing: .04em; line-height: 14px;
+      }
       .dshg-menu-footer {
         display: flex; justify-content: center;
         margin-top: 4px; padding: 4px 0 2px;
@@ -5605,6 +5741,7 @@ window.__ModuleLoader__.load({
         readPaintWorkspaces,
         writePaintWorkspaces,
         pickBootstrapRepo,
+        branchFolders,
         schedulePrewarm,
         resetPrewarm() {
           if (prewarmTimer !== null) {

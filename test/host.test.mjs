@@ -403,6 +403,20 @@ async function main() {
     assert.equal(remoteFeature.remote, 'origin');
     assert.equal(remoteFeature.branch, 'feature');
     assert.equal(withRemote.upstream, 'origin/main');
+    // The branch tree reads drift, tags and worktree occupancy from the same
+    // one-shot payload, so a row never needs a second round trip.
+    const mainRow = withRemote.local.find((item) => item.name === 'main');
+    assert.equal(mainRow.upstream, 'origin/main');
+    assert.equal(mainRow.ahead, 0);
+    assert.equal(mainRow.behind, 0);
+    assert.equal(mainRow.gone, false);
+    assert.ok(mainRow.sha, 'a branch row carries its short object id');
+    assert.equal(mainRow.worktreeMain, true, 'the main checkout marks its branch');
+    assert.equal(mainRow.worktree, fixture.target);
+    const featureRow = withRemote.local.find((item) => item.name === 'feature');
+    assert.equal(featureRow.upstream, null, 'a branch pushed without -u has no upstream');
+    assert.equal(featureRow.worktree, null);
+    assert.ok(Array.isArray(withRemote.tags), 'tags ship with the branch tree');
     git(fixture.target, 'branch', '-D', 'feature');
     const tracked = await ok({
       op: 'checkout',

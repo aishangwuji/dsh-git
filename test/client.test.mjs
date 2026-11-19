@@ -351,6 +351,26 @@ test('prewarming stays silent when both cache layers are already warm', async ()
   assert.deepEqual(calls, []);
 });
 
+test('branch names fold into folders for the branch tree', async () => {
+  const { paint } = await loadClient();
+  const tree = paint.branchFolders([
+    { name: 'fix/login' },
+    { name: 'fix/signup/oauth' },
+    { name: 'main' },
+  ]);
+  // The tree comes from the VM realm, so compare values, not identities.
+  assert.deepEqual([...tree.leaves].map((item) => item.name), ['main']);
+  const fix = tree.dirs.get('fix');
+  assert.ok(fix, 'fix/ must become a folder');
+  assert.deepEqual([...fix.leaves].map((item) => item.name), ['fix/login']);
+  const signup = fix.dirs.get('signup');
+  assert.ok(signup, 'fix/signup must become a nested folder');
+  assert.deepEqual([...signup.leaves].map((item) => item.name), ['fix/signup/oauth']);
+  const empty = paint.branchFolders([]);
+  assert.equal(empty.dirs.size, 0);
+  assert.equal(empty.leaves.length, 0);
+});
+
 test('apply() registers the panel and schedules exactly one deferred prewarm', async () => {
   const workspaceList = [{ id: 'w1', title: 'demo', path: WORKSPACE }];
   // No test seam here: this is the module the loader actually receives.
