@@ -100,6 +100,7 @@ window.__ModuleLoader__.load({
       filterClear: '清除筛选',
       filterActive: '已筛选',
       styleAlert: '样式未加载（诊断）',
+      styleRestartRequired: '样式路由未就绪：需要完全重启 DSH（托盘 Quit 后重开，或设置→插件里关再开本 bundle）才能加载新宿主',
       commitColSubject: '描述',
       commitColTime: '日期',
       commitColAuthor: '作者',
@@ -349,6 +350,7 @@ window.__ModuleLoader__.load({
       filterClear: 'Clear filters',
       filterActive: 'Filtered',
       styleAlert: 'Stylesheet not loaded (diagnostic)',
+      styleRestartRequired: 'Stylesheet route missing: fully restart DSH (Quit from the tray, or toggle this bundle in Settings → Plugins) to load the new host',
       commitColSubject: 'Description',
       commitColTime: 'Date',
       commitColAuthor: 'Author',
@@ -4240,7 +4242,9 @@ window.__ModuleLoader__.load({
         'aria-busy': busy ? 'true' : 'false',
       },
       // Inline styles on purpose: if this banner is visible, a stylesheet was
-      // refused, so a class-based banner would be invisible too.
+      // refused, so a class-based banner would be invisible too. A 405 means the
+      // running Host predates the stylesheet route, which no page reload can
+      // fix — the panel says so instead of only printing numbers.
       styleState ? h('div', {
         role: 'status',
         className: 'dshg-style-alert',
@@ -4253,7 +4257,9 @@ window.__ModuleLoader__.load({
           lineHeight: 1.5,
           fontFamily: 'ui-monospace, monospace',
         },
-      }, `${t('styleAlert')} · ${styleState.status} css=${styleState.css} rules=${styleState.sheet} adopted=${styleState.adopted}${
+      },
+      /405/.test(String(styleState.error || '')) ? `${t('styleRestartRequired')}` : t('styleAlert'),
+      ` · ${styleState.status} css=${styleState.css} rules=${styleState.sheet} adopted=${styleState.adopted}${
         styleState.error ? ` err=${styleState.error}` : ''}`) : null,
       h(PanelHeader, {
         workspaces,
