@@ -41,22 +41,28 @@ in a blank session's composer.
     submodule, for example) stay behind the `Nested N` / `Collapse` toggle,
     where unusable ones are listed greyed out and cannot be selected;
   - nested labels drop their parent's prefix and are marked `↳`.
-- Switches branches from the header: the branch pill opens a switcher with
-  `Local` / `Remote` tabs, a filter box, and a fixed-height scrolling list, so
-  long branch lists stay usable. The remote tab pins the current local branch's
-  upstream to the top while keeping the rest alphabetical. Checking out a remote
-  branch without a local counterpart creates the tracking branch
-  (`git checkout --track`); switching is refused when Git would overwrite local
-  changes.
+- Switches branches from the header through a **branch tree**: `Current branch`,
+  `Local`, `Remote` and `Tags` groups, with local names folded by `/` into
+  folders (`fix/login` reads as a folder, not a wall of names) and a filter box
+  that always expands the folders it matches. Each local row carries its
+  upstream drift (`↑ahead` / `↓behind`, `×` when the upstream is gone) and a `W`
+  badge when another worktree already has it checked out — that row is not a
+  checkout target, because Git would refuse it. Tags are listed read-only in
+  this version. Checking out a remote branch without a local counterpart creates
+  the tracking branch (`git checkout --track`); switching is refused when Git
+  would overwrite local changes.
 - Keeps the branch menu's four bottom actions, matching the reference Git
   picker: **Create and check out new branch...**, **Git graph**, **Start a new
   session in a worktree...**, and **Manage worktrees...**.
 - Adds the same branch pill to the blank-session composer hero row, immediately
   after the agent-preset chip (the `conversation.input.dock` entry portals into
-  the shell's `heroWorkspaceRow`). It appears only for a blank session whose
-  workspace resolves to exactly one Git repository, so active sessions,
-  non-repository workspaces, and multi-repository project folders (where one
-  branch cannot represent the whole workspace) keep the untouched composer.
+  the shell's `heroWorkspaceRow`). It carries the same status counters as the
+  header pill — `±uncommitted` (amber), `↑to push` (green), `↓to pull` (amber) —
+  and only non-zero counters are drawn, refreshed on focus and on a slow visible
+  poll. It appears only for a blank session whose workspace resolves to exactly
+  one Git repository, so active sessions, non-repository workspaces, and
+  multi-repository project folders (where one branch cannot represent the whole
+  workspace) keep the untouched composer.
 - Creates a branch from the current `HEAD` and switches to it immediately. The
   dialog mirrors `git check-ref-format --branch` for instant feedback while the
   host remains the authority; duplicate names are reported without touching the
@@ -102,10 +108,14 @@ in a blank session's composer.
   commit details on the right. Drag the splitter between panes to resize them
   (double-click resets, arrow keys nudge 16px); widths are remembered per profile.
 - Shows the checked-out branch's reachable history as a table (graph, description,
-  date, author, SHA) with branch/tag pills, a commit filter, and `Load more` paging
-  (200 commits a page). Switching branches re-reads this history; the **Git graph**
-  dialog deliberately keeps the all-refs view so a branch comparison is one click
-  away.
+  date, author, SHA) with branch/tag pills, an instant text filter over the loaded
+  page, and `Load more` paging (200 commits a page). Above the table a filter row
+  narrows history **in Git**: author, a date preset (today / 7 days / 30 days /
+  this year), a path filter, and a newest-first / oldest-first toggle. Every
+  filter keeps paging through the filtered set, so `Load more` never jumps out of
+  what the user asked for. Switching branches re-reads this history; the **Git
+  graph** dialog deliberately keeps the all-refs view so a branch comparison is
+  one click away.
 - Opens commit details as a card, like Zed's commit view: initials avatar, author,
   date, email, full hash with a copy button, parent commits, a "view on GitHub /
   GitLab / Gitee" link derived from the origin remote, the message, and the
@@ -198,6 +208,28 @@ in a blank session's composer.
   "reveal in file manager" would need a host slot that does not exist yet.
 - Commands run through the Harness `subprocess` service with bounded output,
   a hard timeout, and a scrubbed environment.
+- **Writes are serialized per repository on the host**, not only per panel: the
+  main Git tab and the sidebar seat can both be open, and a promise-chain queue
+  keyed by the checkout means the same work tree never runs two `git` writes at
+  once. `dispatch` classifies every operation as a read or a write, and a test
+  fails if a new operation is neither.
+- **Destructive operations require `confirm: true`** from the caller. Removing a
+  worktree with `--force` (deletes uncommitted files) or with `deleteBranch`
+  (force-deletes a branch) is refused with `CONFIRM_REQUIRED` otherwise; the UI
+  sends that flag only from the step where the user actually confirmed (the
+  inline force button, or the "delete branch too" checkbox).
+- History filters run in Git (`--author`, `--since`, `--until`, `--reverse`, and
+  `-- <path>` after `safeRepoPath`), so paging stays inside the filtered set; the
+  first-paint cache only stores the unfiltered first page, because that is the
+  page a fresh mount shows.
+- The branch tree is one `for-each-ref` (heads + remotes + tags, with upstream
+  drift) plus one `git worktree list --porcelain`: two spawns, no per-branch
+  request.
+- Two render checks back the client half: `scripts/ssr-check.mjs` renders the cold
+  panel (header + skeleton) and `scripts/panel-render-check.mjs` renders a panel
+  with a seeded first-paint page, so the chrome that only exists once data is on
+  screen is covered without a browser. Both skip cleanly when React cannot be
+  resolved and both run from `npm run check`.
 - Operations are serialized per panel; the UI keeps commit drafts per workspace
   and polls status every five seconds while visible.
 - The panel is registered as a `main` slot keyed `git` and a
@@ -226,6 +258,10 @@ in a blank session's composer.
 - **A repository shows `(unavailable)`**: its work tree cannot be read, which is
   normal for an uninitialised submodule. Initialise it in a terminal
   (`git submodule update --init`) and reopen the switcher.
+- **`CONFIRM_REQUIRED` when driving the route by hand**: destructive operations
+  (force worktree removal, branch deletion during removal) need `confirm: true`
+  in the request body. The panel sends it from its own confirmation step; a
+  scripted caller must pass it explicitly.
 
 ## Files
 
@@ -243,6 +279,16 @@ in a blank session's composer.
   that reproduces nested, ignored, worktree, bare, and enclosing repositories,
   plus branch creation and managed-worktree create/list/remove safety. Run with
   `npm test` (needs `git` on `PATH`).
-- `test/client.test.mjs` — first-paint cache and prewarm-planner checks: the
-  Client half is evaluated in a Node VM with a stub browser around it, so the
-  seed/LRU/TTL rules and the prewarm read order are asserted without React.
+- `test/client.test.mjs` — first-paint cache, prewarm planner, branch-folder and
+  pill-counter checks: the Client half is evaluated in a Node VM with a stub
+  browser around it, so the seed/LRU/TTL rules, the prewarm read order and the
+  pure helpers are asserted without React.
+- `test/invariants.test.mjs` — the rules no behavioural test can express: the
+  client only requires the browser baseline, the host only imports Node builtins
+  and its own modules, git stays argv-only, every dispatched operation is either
+  a declared read or inside the write lock, destructive operations carry the
+  confirmation guard, the manifest/CI contract holds, both locales declare the
+  same keys, and every literal `t()` key exists.
+- `scripts/ssr-check.mjs`, `scripts/panel-render-check.mjs` — the two render
+  checks (cold panel with skeleton, seeded panel with data). `npm run check`
+  runs them together with the suites; both skip when React is not resolvable.

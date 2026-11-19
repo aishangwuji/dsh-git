@@ -102,9 +102,11 @@ cached page and the refresh happens behind it. Cold, it is two round trips.
 
 ## Verifying by hand
 
-1. `npm test` — the client test drives the real `client.js` in a Node VM
+1. `npm run check` — the client test drives the real `client.js` in a Node VM
    (`__paint` seam): seed round-trip across a module reload, TTL expiry, LRU
-   caps, the bootstrap pick order, and the prewarm read order/silence.
+   caps, the bootstrap pick order, and the prewarm read order/silence. The same
+   command runs the two render checks (cold panel, seeded panel), which is how
+   the data-bearing chrome is covered without a browser.
 2. In the app: open the Git panel, wait for it, close it, open it again — the
    second open paints immediately. Reload the page (⌘/Ctrl+R) and open it: still
    immediate, because `sessionStorage` kept the seed.

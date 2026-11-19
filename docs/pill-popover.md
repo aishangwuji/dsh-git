@@ -74,14 +74,14 @@
 - 点击触发器切换展开；点击外部（`pointerdown` 捕获阶段）关闭；`Esc` 关闭。
 - 选择一行：先关闭，再执行动作；当前项（如当前仓库/分支）带勾，且不再触发重复动作。
 - 触发器上可带计数徽标（如仓库的更改数）和图标（分支、仓库）。
-- 列表可超出高度后滚动；带筛选的变体（分支菜单）把「Tab + 筛选框」固定在顶部，只有列表区滚动；远端列表把当前分支的上游分支排在最前，其余按名称排序。
+- 列表可超出高度后滚动；带筛选的变体（分支菜单）把筛选框固定在顶部，只有列表区滚动。分支菜单按 `当前分支 / 本地 / 远端 / 标签` 分组，本地分支按 `/` 折叠成文件夹，筛选时自动展开命中目录；远端行把当前分支的上游排在最前，其余按名称排序。
 - 触发器 `aria-haspopup="listbox"`、`aria-expanded`，面板 `role="listbox"`，行 `role="option"` + `aria-selected`。
 
 ## 变体
 
 1. **普通列表**：工作区切换。
 2. **分组列表 + 底部分组动作**：仓库切换（`项目` / `子仓库` 分组，底部 `子仓库 N` 展开）。
-3. **固定头 + 筛选 + 滚动列表**：分支切换（`本地` / `远端` 两个 Tab，列表区固定高度滚动）。
+3. **分组树 + 筛选 + 滚动列表**：分支切换（`当前分支` / `本地`（按 `/` 折叠）/ `远端` / `标签` 四组；本地行带 `↑ahead`/`↓behind`、上游丢失的 `×` 与 worktree 占用的 `W`，被占用的分支不可点击签出）。
 4. **对话框字段 + 筛选列表**：worktree 基线分支（全宽胶囊触发，`BranchFieldMenu` 顶部筛选、列表固定高度滚动；对话框 body 临时取消滚动裁剪，让面板可以浮出卡片）。
 
 ## 何时用 / 何时不用
@@ -104,7 +104,7 @@
 - `PillSelect`：[client.js](../client.js) 第 1317 行附近
 - `MenuItem`：第 1299 行附近
 - `BranchFieldMenu`：第 1669 行附近
-- 分支菜单（固定头 + 滚动列表）：`BranchSwitcher` 与 `.dshg-menu-branch` / `.dshg-menu-list`
+- 分支树（分组 + 按 `/` 折叠 + 徽标）：`BranchSwitcher`、`branchFolders`，样式见 `.dshg-menu-group` / `.dshg-branch-row` / `.dshg-branch-folder` / `.dshg-branch-worktree`
 - 对话框字段变体：`.dshg-pillselect-field` / `.dshg-menu-field`，由 `CreateWorktreeDialog` 使用
 - 分组逻辑（项目 / 子仓库 / 不可用）：`repoGroups` 与 `PanelHeader` 的仓库 `PillSelect`
 
