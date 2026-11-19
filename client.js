@@ -1,6 +1,7 @@
 window.__ModuleLoader__.load({
   id: '@aishangwuji/dsh-git',
   factory(require) {
+    /* ---- client/00-preamble.js ---- */
     const React = require('react');
     const { createPortal } = require('react-dom');
     const { useState, useEffect, useMemo, useRef, useCallback, useLayoutEffect } = React;
@@ -30,6 +31,7 @@ window.__ModuleLoader__.load({
     /** Session summary lookup used by the composer chip when its slot props omit hooks. */
     let sessionBridge = null;
 
+    /* ---- client/10-i18n.js ---- */
     const zh = {
       panel: 'Git 工作台',
       git: 'Git',
@@ -530,6 +532,7 @@ window.__ModuleLoader__.load({
       err_UNKNOWN: 'Operation failed',
     };
 
+    /* ---- client/20-format.js ---- */
     function tf(key, vars) {
       let text = String(t(key));
       if (vars) {
@@ -604,6 +607,7 @@ window.__ModuleLoader__.load({
       return tf('pushUpdated', { commits: Number(result.pushedCommits) || 0 });
     }
 
+    /* ---- client/22-repo.js ---- */
     function cx(...values) {
       return values.filter(Boolean).join(' ');
     }
@@ -857,6 +861,8 @@ window.__ModuleLoader__.load({
      * that always shows `±0 ↑0 ↓0` is noise, and the point of the counters is
      * to say "something moved" at a glance.
      */
+
+    /* ---- client/24-api.js ---- */
     function pillCounters(status) {
       const counters = [];
       if (!status) return counters;
@@ -1297,6 +1303,7 @@ window.__ModuleLoader__.load({
       return result;
     }
 
+    /* ---- client/30-icons.js ---- */
     function Svg({ size = 16, children, className }) {
       return h('svg', {
         width: size,
@@ -1446,6 +1453,7 @@ window.__ModuleLoader__.load({
       }, h(GitGlyph, { size }));
     }
 
+    /* ---- client/40-status.js ---- */
     function GitSidebarStatus({ openPanel }) {
       const [summary, setSummary] = useState(null);
       useEffect(() => {
@@ -1615,6 +1623,7 @@ window.__ModuleLoader__.load({
       return 'modified';
     }
 
+    /* ---- client/42-tree.js ---- */
     function renderTreeRows({
       node, depth, section, expanded, repoRoot, onToggleExpand, onSelect, onOpen, onToggleFile, onToggleDir,
     }) {
@@ -1710,6 +1719,7 @@ window.__ModuleLoader__.load({
       return rows;
     }
 
+    /* ---- client/44-controls.js ---- */
     function DiffText({ text, emptyText }) {
       if (!text) {
         return h('div', { className: 'dshg-empty dshg-empty-inline' }, emptyText || t('diffEmpty'));
@@ -1832,6 +1842,8 @@ window.__ModuleLoader__.load({
     }
 
     /** Fold branch names into `/` folders for the tree view. */
+
+    /* ---- client/50-branch.js ---- */
     function branchFolders(items) {
       const root = { dirs: new Map(), leaves: [] };
       for (const item of items) {
@@ -2052,6 +2064,8 @@ window.__ModuleLoader__.load({
      * Keeping it inline (not a portal) matches the panel's existing stacking
      * model and leaves the host sidebar visible, like the reference dialogs.
      */
+
+    /* ---- client/55-dialogs.js ---- */
     function DialogShell({ title, subtitle, onClose, children, footer, className }) {
       useEffect(() => {
         const onKeyDown = (event) => {
@@ -2434,6 +2448,8 @@ window.__ModuleLoader__.load({
      * A mutation observer keeps the portal host in that row across shell
      * re-renders without participating in the row's React children.
      */
+
+    /* ---- client/60-composer.js ---- */
     function HeroRowPortal({ active, children, anchorRef }) {
       const [host] = useState(() => document.createElement('div'));
       useLayoutEffect(() => {
@@ -2685,6 +2701,7 @@ window.__ModuleLoader__.load({
         }) : null);
     }
 
+    /* ---- client/65-changes.js ---- */
     function PanelHeader({
       workspaces, workspace, repos, repo, showAllRepos, status, busy,
       onWorkspace, onRepo, onToggleRepos, onRefresh, onFetch, onPull, onPush,
@@ -2904,6 +2921,7 @@ window.__ModuleLoader__.load({
             }) : null));
     }
 
+    /* ---- client/67-history.js ---- */
     function layoutGraph(commits) {
       const lanes = [];
       const laneColor = [];
@@ -3238,6 +3256,7 @@ window.__ModuleLoader__.load({
       return Array.from(text).slice(0, 2).join('').toUpperCase();
     }
 
+    /* ---- client/69-commit.js ---- */
     function CommitFileRow({ file, active, onClick }) {
       const status = String(file.status || 'M').charAt(0);
       const slash = file.path.lastIndexOf('/');
@@ -3441,6 +3460,7 @@ window.__ModuleLoader__.load({
           bars(6, 'diff')));
     }
 
+    /* ---- client/70-panel.js ---- */
     function GitPanel() {
       const rootRef = useRef(null);
       const busyRef = useRef(false);
@@ -4482,6 +4502,8 @@ window.__ModuleLoader__.load({
      * a link is not a <style data-plugin>, so the host's HMR bookkeeping never
      * claims or removes it.
      * ------------------------------------------------------------------ */
+
+    /* ---- client/75-styles.js ---- */
     const STYLE_URL = '/dsh-git-6b1e/styles.css';
     const styleState = { status: 'idle', cssLength: 0, error: null, sheet: null, link: null };
     let stylePromise = null;
@@ -4564,6 +4586,7 @@ window.__ModuleLoader__.load({
      * shipped file tree.
      * ------------------------------------------------------------------ */
 
+    /* ---- client/80-decorations.js ---- */
     const TREE_STATUS = {
       modified: { badge: 'M', labelKey: 'kindModified' },
       added: { badge: 'A', labelKey: 'kindAdded' },
@@ -4977,6 +5000,7 @@ window.__ModuleLoader__.load({
       };
     }
 
+    /* ---- client/90-apply.js ---- */
     function apply(ctx) {
       ctx.effect(() => {
         // The sheet is fetched from this plugin's route; the panel's own

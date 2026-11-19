@@ -20,8 +20,11 @@ jobs:
         run: |
           node scripts/ssr-check.mjs
           node scripts/panel-render-check.mjs
+      # client.js is a committed build artifact: client/*.js are the sources.
+      - name: client artifact is up to date
+        run: node scripts/build-client.mjs --check
       - name: syntax check
         run: |
           node --check index.js
           node --check client.js
-          for file in host/*.js; do node --check "$file"; done
+          for file in host/*.js client/*.js; do node --check "$file"; done

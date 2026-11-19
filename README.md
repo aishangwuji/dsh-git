@@ -287,7 +287,13 @@ in a blank session's composer.
 - `host/route.js` — same-origin fence, bounded body reads, JSON responses.
 - `host/runtime.js` — the Cordis context and logger the helpers read instead of
   closing over `apply()`.
-- `client.js` — React view registered into `main` and `sidebar.panellist`.
+- `client.js` — the built client artifact (committed; do not edit it by hand).
+- `client/*.js` — the client sources: 19 fragments concatenated in filename order
+  into the single `client.js` factory scope. The loader contract is one artifact
+  per package and `require` is limited to `react`/`react-dom`, so these are
+  fragments rather than modules.
+- `scripts/build-client.mjs` — the client build (`npm run build:client`), plus
+  `--check` to prove the committed artifact is current (CI runs it).
 - `styles.css` — the panel stylesheet, served by the plugin route at
   `/dsh-git-6b1e/styles.css` and adopted by the client as a constructable
   stylesheet. It is a real file rather than a template literal in the bundle: a
@@ -318,3 +324,12 @@ in a blank session's composer.
 - `scripts/ssr-check.mjs`, `scripts/panel-render-check.mjs` — the two render
   checks (cold panel with skeleton, seeded panel with data). `npm run check`
   runs them together with the suites; both skip when React is not resolvable.
+
+### Editing the client
+
+Edit `client/*.js`, then run `npm run build:client` and commit both the part and
+the regenerated `client.js`. `npm run check:client` (also in CI) fails when the
+committed artifact no longer matches its sources, so a forgotten rebuild cannot
+ship. A part is a fragment: everything is inside the loader's
+`factory(require) { … }`, statements share one scope, and only `react` /
+`react-dom` may be required.

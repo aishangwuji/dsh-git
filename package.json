@@ -38,7 +38,9 @@
   "scripts": {
     "test": "node --test test/host.test.mjs test/client.test.mjs test/invariants.test.mjs",
     "check:render": "node scripts/ssr-check.mjs && node scripts/panel-render-check.mjs",
-    "check": "npm test && npm run check:render"
+    "build:client": "node scripts/build-client.mjs",
+    "check:client": "node scripts/build-client.mjs --check",
+    "check": "npm test && npm run check:render && npm run check:client"
   },
   "dsh": {
     "bundle": {

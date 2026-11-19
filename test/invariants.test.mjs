@@ -146,6 +146,29 @@ test('the panel stylesheet is a real file, not a literal inside the bundle', () 
   assert.ok(PKG.files.includes('styles.css'), 'styles.css must ship in the package');
 });
 
+test('client.js is the built artifact of the client/ parts', async () => {
+  // The loader contract is one client.js per package, and the browser baseline
+  // only exposes react/react-dom, so the client is a concatenation of fragments
+  // that share one factory scope. The parts are the sources; client.js is built
+  // and committed so installation stays build-free.
+  const { readdir } = await import('node:fs/promises');
+  const parts = (await readdir(join(ROOT, 'client'))).filter((name) => name.endsWith('.js')).sort();
+  assert.ok(parts.length >= 15, `expected the split client, found ${parts.length} parts`);
+  for (const part of parts) {
+    const source = await read(join('client', part));
+    assert.ok(source.trim().length > 0, `client/${part} is empty`);
+    assert.doesNotMatch(source, /__ModuleLoader__/, `client/${part} must be a fragment, not a loader wrapper`);
+    assert.match(CLIENT, new RegExp(`client/${part.replace('.js', '\\.js')} ---- \\*/`), `client.js does not include client/${part}; run npm run build:client`);
+    // Ratchet, not a target: GitPanel is still one large component, so the
+    // ceiling sits above it. A part that grows past this must be split first.
+    const count = source.split('\n').length;
+    assert.ok(count <= 1200, `client/${part} is ${count} lines; split it instead of growing a god file`);
+  }
+  assert.match(PKG.scripts['build:client'], /build-client\.mjs/, 'the client build script is missing');
+  assert.match(PKG.scripts.check, /check:client/, 'the check script must verify the client artifact');
+  assert.match(CI, /build-client\.mjs --check/, 'CI must fail when client.js is stale');
+});
+
 test('the host stays split into domain modules instead of one god file', () => {
   for (const file of HOST_FILES) {
     assert.ok(HOST_SOURCES.get(file).length > 0, `${file} is missing`);
