@@ -1,6 +1,6 @@
 # dsh-git 项目说明
 
-`@aishangwuji/dsh-git` 是 DSH 的 Git 工作台面板：工作区状态、变更树、提交图、提交/分支/worktree、fetch/pull/push。本文只记录这个插件自己的结构、约束、命令和技术债；DSH 插件的通用加载模型见工作区根目录的 `AGENTS.md`。
+`@aishangwuji/dsh-git` 是 DSH 的 Git 工作台面板：工作区状态、变更树、提交图、提交/分支/worktree、fetch/pull/push。本文只记录这个插件自己的结构、约束、命令和坑；DSH 插件的通用加载模型见工作区根目录的 `AGENTS.md`。
 
 ## 1. 边界
 
@@ -27,7 +27,7 @@ client/                 客户端源码段（拼接成 client.js）
   00-preamble.js        基线 require、NS/RPC_PATH、桥接
   10-i18n.js            zh/en 词典
   20-format.js … 69-commit.js   文案/仓库/paint 缓存/图标/树/分支/对话框/历史/提交
-  70-panel.js           GitPanel + GitPanelRoot（剩余最大单段，见技术债）
+  70-panel.js           GitPanel + GitPanelRoot（剩余最大单段，见 `systemmap/tech-debt.md`）
   75-styles.js          样式表 fetch + adopt + 自检
   80-decorations.js     工作区树状态装饰与 tooltip
   90-apply.js           apply() 与测试接缝
@@ -38,7 +38,7 @@ test/                   host / client / invariants 三个套件
 docs/                   first-paint.md（首帧与预热）、pill-popover.md（胶囊弹层规范）
 ```
 
-数据流：**先画缓存 → 后台校准（SWR）→ 一次 RPC 拿全量**；失败不清缓存，只标 stale。
+数据流：**先画缓存 → 后台校准（SWR）→ 一次 RPC 拿全量**；失败不清缓存，只标 stale。技术债、未接入模块与待评估项见 `systemmap/tech-debt.md`，不要写回本文。
 
 宿主路由只有一个前缀 `/dsh-git-6b1e`：
 
@@ -86,13 +86,7 @@ npm run check         # 上面全部（发版前必跑）
 3. **“刷新页面就能加载新宿主”**
    事实：不能。宿主只在 profile 装载时读一次；`client.js` 才是刷新即生效。改 `index.js` / `host/*` / `styles.css` 路由 / `cordis.patch.yml` 后必须重启 DSH，或在插件页把本 bundle 关掉再打开。
 
-## 6. 技术债
-
-1. `client/70-panel.js` 1041 行：`GitPanel` 仍是单组件。拆法是把子渲染（头部 / 更改 / 历史 / 提交栏）提成独立组件并传 props，属于有风险的改动，已有 1200 行上限作棘轮。
-2. 只在 `main` 座位渲染面板，`sidebar.panellist` 只是入口图标；没有 docked 侧栏面板体。
-3. e2e 仍是“离线渲染自检 + 路由级测试”，没有真实浏览器端到端。
-
-## 7. 仓库与发布
+## 6. 仓库与发布
 
 - GitHub：`aishangwuji/dsh-git`（public，`main`）
 - npm：`@aishangwuji/dsh-git`
