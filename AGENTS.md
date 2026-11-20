@@ -90,5 +90,7 @@ npm run check         # 上面全部（发版前必跑）
 
 - GitHub：`aishangwuji/dsh-git`（public，`main`）
 - npm：`@aishangwuji/dsh-git`
-- 发布：`npm publish --access public --registry=https://registry.npmjs.org`；通用 npm/2FA/GitHub Release 流程见 `D:\Projects\dsh\AGENTS.md` §8。
+- 发布：`npm publish --access public --registry=https://registry.npmjs.org`；通用 npm/2FA/GitHub Release 流程见 `D:\Projects\dsh\AGENTS.md` §5。
 - 本机 profile 里是 `link:D:/Projects/dsh/dsh-git`（开发用）；改宿主代码后仍需重启 DSH。
+
+
