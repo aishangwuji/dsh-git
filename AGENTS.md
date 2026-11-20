@@ -2,7 +2,13 @@
 
 `@aishangwuji/dsh-git` 是 DSH 的 Git 工作台面板：工作区状态、变更树、提交图、提交/分支/worktree、fetch/pull/push。本文只记录这个插件自己的结构、约束、命令和技术债；DSH 插件的通用加载模型见工作区根目录的 `AGENTS.md`。
 
-## 1. 结构（0.2.1）
+## 1. 边界
+
+- 只服务 DSH 工作区的 Git 操作：状态、变更树、提交图、commit/branch/worktree、fetch/pull/push。
+- 不做通用 Git GUI、不做远程托管、不操作工作区白名单之外的仓库。
+- 所有 git 调用走宿主 `subprocess`，argv 数组、不经过 shell；破坏性操作必须 confirm。
+
+## 2. 结构（0.2.1）
 
 ```
 index.js                插件入口：inject、apply、HTTP 路由、runOperation 分发
@@ -42,7 +48,7 @@ docs/                   first-paint.md（首帧与预热）、pill-popover.md（
 
 写操作纪律：每个仓库一条 promise 队列（`withRepoLock`），破坏性操作必须带 `confirm: true`，否则 `CONFIRM_REQUIRED`。
 
-## 2. 项目约束（违反会被测试拦下）
+## 3. 项目约束（违反会被测试拦下）
 
 | 约束 | 在哪拦 |
 |---|---|
@@ -56,7 +62,7 @@ docs/                   first-paint.md（首帧与预热）、pill-popover.md（
 
 **规则即测试**：要改这些规则，先改 `test/invariants.test.mjs` 里的断言，再改代码，不要绕。
 
-## 3. 日常命令
+## 4. 日常命令
 
 ```powershell
 npm test              # host + client + invariants 三个套件
@@ -68,7 +74,7 @@ npm run check         # 上面全部（发版前必跑）
 
 渲染自检会从 `C:\Users\15216\.dsh\profiles\desktop\package.json` 解析 React（解析不到时自动跳过）。宿主测试需要 `git` 在 `PATH` 上，会在临时目录造一个包含嵌套仓库 / 忽略目录 / worktree / bare 仓库的 fixture。
 
-## 4. 这个项目踩过的坑
+## 5. 这个项目踩过的坑
 
 1. **“面板没样式 = CSP 拦截 / shadow root / adoptedStyleSheets 不支持”**
    事实：样式规则原本以 60KB 模板字面量放在客户端产物里，到达页面时内容被清空（面板自检量到 `style=3 adopted=1 sheet=0`，而磁盘文件里有 386 条规则）。
@@ -80,13 +86,13 @@ npm run check         # 上面全部（发版前必跑）
 3. **“刷新页面就能加载新宿主”**
    事实：不能。宿主只在 profile 装载时读一次；`client.js` 才是刷新即生效。改 `index.js` / `host/*` / `styles.css` 路由 / `cordis.patch.yml` 后必须重启 DSH，或在插件页把本 bundle 关掉再打开。
 
-## 5. 技术债
+## 6. 技术债
 
 1. `client/70-panel.js` 1041 行：`GitPanel` 仍是单组件。拆法是把子渲染（头部 / 更改 / 历史 / 提交栏）提成独立组件并传 props，属于有风险的改动，已有 1200 行上限作棘轮。
 2. 只在 `main` 座位渲染面板，`sidebar.panellist` 只是入口图标；没有 docked 侧栏面板体。
 3. e2e 仍是“离线渲染自检 + 路由级测试”，没有真实浏览器端到端。
 
-## 6. 仓库与发布
+## 7. 仓库与发布
 
 - GitHub：`aishangwuji/dsh-git`（public，`main`）
 - npm：`@aishangwuji/dsh-git`
